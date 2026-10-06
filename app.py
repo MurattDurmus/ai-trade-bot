@@ -4,64 +4,83 @@ import yfinance as yf
 from xgboost import XGBClassifier
 import plotly.graph_objects as go
 from datetime import datetime
+import requests
+import base64
 import json
-import os
 import time
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="AI Trade Terminali", page_icon="📈", layout="wide")
-st.title("📈 Kripto & Makro AI Trade Terminali")
-
-# --- KALICI CÜZDAN DOSYA YÖNETİMİ (JSON) ---
-DOSYA_ADI = "cuzdan_verileri.json"
+st.title("📈 Kripto & Makro AI Trade Terminali (GitHub Senkronize)")
 
 
-def verileri_yukle():
-    if os.path.exists(DOSYA_ADI):
-        try:
-            with open(DOSYA_ADI, "r", encoding="utf-8") as f:
-                veri = json.load(f)
-                # Tarih alanlarını string'den datetime'a çevir
-                for islem in veri.get("islem_gecmisi", []):
-                    if isinstance(islem['Tarih'], str):
-                        islem['Tarih'] = datetime.fromisoformat(islem['Tarih'])
-                return veri
-        except:
-            pass
-    # Dosya yoksa varsayılan başlangıç değerleri
-    return {
-        "nakit": 10000.0,
-        "btc": 0.0,
-        "islem_gecmisi": [],
-        "son_alim_fiyati": 0.0
-    }
+# --- GİTHUB ÜZERİNDEN VERİ OKUMA VE KAYDETME ---
+def github_veri_oku():
+    try:
+        token = st.secrets["GITHUB_TOKEN"]
+        repo = st.secrets["GITHUB_REPO"]
+        url = f"https://api.github.com/repos/{repo}/contents/cuzdan_verileri.json"
+        headers = {"Authorization": f"Bearer {token}"}
+
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            content_json = response.json()
+            file_content_bytes = base64.b64decode(content_json["content"])
+            veri = json.loads(file_content_bytes.decode('utf-8'))
+            for islem in veri.get("islem_gecmisi", []):
+                if isinstance(islem['Tarih'], str):
+                    islem['Tarih'] = datetime.fromisoformat(islem['Tarih'])
+            return veri["nakit"], veri["btc"], veri["islem_gecmisi"], veri["son_alim_fiyati"]
+    except Exception:
+        pass
+    # Varsayılan başlangıç değerleri
+    return 10000.0, 0.0, [], 0.0
 
 
-def verileri_kaydet(nakit, btc, islem_gecmisi, son_alim_fiyati):
-    # Tarih nesnelerini JSON için string'e çevir
-    gecmis_kopya = []
-    for islem in islem_gecmisi:
-        islem_k = islem.copy()
-        if isinstance(islem_k['Tarih'], datetime):
-            islem_k['Tarih'] = islem_k['Tarih'].isoformat()
-        gecmis_kopya.append(islem_k)
+def github_veri_kaydet(nakit, btc, islem_gecmisi, son_alim_fiyati):
+    try:
+        token = st.secrets["GITHUB_TOKEN"]
+        repo = st.secrets["GITHUB_REPO"]
+        url = f"https://api.github.com/repos/{repo}/contents/cuzdan_verileri.json"
+        headers = {"Authorization": f"Bearer {token}"}
 
-    veri = {
-        "nakit": nakit,
-        "btc": btc,
-        "islem_gecmisi": gecmis_kopya,
-        "son_alim_fiyati": son_alim_fiyati
-    }
-    with open(DOSYA_ADI, "w", encoding="utf-8") as f:
-        json.dump(veri, f, ensure_ascii=False, indent=4)
+        # Mevcut dosyanın SHA değerini almak için önce oku
+        sha = None
+        resp_get = requests.get(url, headers=headers)
+        if resp_get.status_code == 200:
+            sha = resp_get.json().get("sha")
+
+        gecmis_kopya = []
+        for islem in islem_gecmisi:
+            islem_k = islem.copy()
+            if isinstance(islem_k['Tarih'], datetime):
+                islem_k['Tarih'] = islem_k['Tarih'].isoformat()
+            gecmis_kopya.append(islem_k)
+
+        veri = {
+            "nakit": nakit,
+            "btc": btc,
+            "islem_gecmisi": gecmis_kopya,
+            "son_alim_fiyati": son_alim_fiyati
+        }
+
+        json_str = json.dumps(veri, ensure_ascii=False, indent=4)
+        encoded_content = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
+
+        data = {
+            "message": "Otomatik cüzdan ve işlem güncellemesi",
+            "content": encoded_content
+        }
+        if sha:
+            data["sha"] = sha
+
+        requests.put(url, headers=headers, json=data)
+    except Exception as e:
+        st.warning(f"GitHub kayıt hatası: {e}")
 
 
-# Verileri yükle
-cuzdan = verileri_yukle()
-nakit = cuzdan["nakit"]
-btc = cuzdan["btc"]
-islem_gecmisi = cuzdan["islem_gecmisi"]
-son_alim_fiyati = cuzdan["son_alim_fiyati"]
+# Verileri GitHub'dan yükle
+nakit, btc, islem_gecmisi, son_alim_fiyati = github_veri_oku()
 
 
 @st.cache_resource
@@ -133,7 +152,7 @@ def grafik_ciz(df_saatlik, aktif_gecmis):
 
 # --- ANA EKRAN YÜKLEMESİ ---
 if st.button("🔄 Piyasayı Analiz Et (Verileri Güncelle)", use_container_width=True):
-    with st.spinner('Makro veriler, ağırlıklı skorlar ve saatlik mumlar analiz ediliyor...'):
+    with st.spinner('Makro veriler, piyasa skoru ve saatlik mumlar analiz ediliyor...'):
         son_durum_makro, df_saatlik = veri_getir()
 
         btc_fiyat = float(df_saatlik['Close'].iloc[-1])
@@ -227,8 +246,8 @@ if st.button("🔄 Piyasayı Analiz Et (Verileri Güncelle)", use_container_widt
                 })
                 st.toast(f'Kademeli Satış Yapıldı! Tutar: ${satilacak_tutar:,.0f}', icon='🔴')
 
-        # Güncel cüzdan durumunu diske kaydet
-        verileri_kaydet(nakit, btc, islem_gecmisi, son_alim_fiyati)
+        # Güncel cüzdan durumunu doğrudan GitHub deposuna kaydet
+        github_veri_kaydet(nakit, btc, islem_gecmisi, son_alim_fiyati)
 
         # --- ARAYÜZ YERLEŞİMİ ---
         col_grafik, col_hesap = st.columns([3, 1])
@@ -263,19 +282,16 @@ if st.button("🔄 Piyasayı Analiz Et (Verileri Güncelle)", use_container_widt
                         st.write(f"**İşlem Tutarı:** ${islem['Tutar']:,.2f}")
 
 else:
-    # Butona basılmadığı anlarda bile diske kaydedilmiş cüzdanı ve son durumu göster
     col_grafik, col_hesap = st.columns([3, 1])
     with col_hesap:
-        st.subheader("💼 Sanal Portföy (Kayıtlı)")
-        # Anlık fiyatı görmek için son veriyi çekelim
+        st.subheader("💼 Sanal Portföy (GitHub Hafızası)")
         try:
             df_saatlik_anlik = yf.download('BTC-USD', period='2d', interval='1h', progress=False)
             if isinstance(df_saatlik_anlik.columns, pd.MultiIndex):
                 df_saatlik_anlik.columns = df_saatlik_anlik.columns.droplevel(1)
-            anlik_fiyat = float(
-                df_saclik_close if 'df_saclik_close' in locals() else df_saatlik_anlik['Close'].iloc[-1])
+            anlik_fiyat = float(df_saatlik_anlik['Close'].iloc[-1])
         except:
-            anlik_fiyat = 85000.0  # Hata durumunda yaklaşık değer
+            anlik_fiyat = 85000.0
 
         toplam_varlik = nakit + (btc * anlik_fiyat)
         kar_zarar = toplam_varlik - 10000.0
@@ -298,7 +314,7 @@ else:
 
     with col_grafik:
         st.info(
-            "👆 Botun hafızası diske bağlandı! Piyasayı analiz etmek ve işlemleri güncellemek için yukarıdaki butona tıklayın.")
+            "👆 Botun hafızası GitHub'a bağlandı! Piyasayı analiz etmek ve işlemleri güncellemek için yukarıdaki butona tıklayın.")
 
 time.sleep(3600)
 st.rerun()

@@ -4,3 +4,4 @@ yfinance
 xgboost
 plotly
 scikit-learn
+requests
