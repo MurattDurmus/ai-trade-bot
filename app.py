@@ -11,7 +11,7 @@ import time
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="AI Trade Terminali", page_icon="📈", layout="wide")
-st.title("📈 Kripto & Makro AI Trade Terminali (GitHub Senkronize)")
+st.title("📈 Kripto & 10'lu Makro AI Trade Terminali")
 
 
 # --- GİTHUB ÜZERİNDEN VERİ OKUMA VE KAYDETME ---
@@ -33,7 +33,6 @@ def github_veri_oku():
             return veri["nakit"], veri["btc"], veri["islem_gecmisi"], veri["son_alim_fiyati"]
     except Exception:
         pass
-    # Varsayılan başlangıç değerleri
     return 10000.0, 0.0, [], 0.0
 
 
@@ -44,7 +43,6 @@ def github_veri_kaydet(nakit, btc, islem_gecmisi, son_alim_fiyati):
         url = f"https://api.github.com/repos/{repo}/contents/cuzdan_verileri.json"
         headers = {"Authorization": f"Bearer {token}"}
 
-        # Mevcut dosyanın SHA değerini almak için önce oku
         sha = None
         resp_get = requests.get(url, headers=headers)
         if resp_get.status_code == 200:
@@ -68,7 +66,7 @@ def github_veri_kaydet(nakit, btc, islem_gecmisi, son_alim_fiyati):
         encoded_content = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
 
         data = {
-            "message": "Otomatik cüzdan ve işlem güncellemesi",
+            "message": "10'lu Makro Bot: Otomatik cüzdan güncellemesi",
             "content": encoded_content
         }
         if sha:
@@ -91,37 +89,60 @@ def modeli_yukle():
 
 
 model = modeli_yukle()
-ozellik_kolonlari = ['BTC_SMA_20', 'BTC_Degisim_1_Gun', 'BTC_Degisim_7_Gun', 'DXY_Degisim', 'US10Y_Baski',
-                     'VIX_Risk_Durumu', 'SP500_Degisim']
+
+# Yeni 10'lu Makro Özellik Seti
+ozellik_kolonlari = [
+    'BTC_SMA_20', 'BTC_Degisim_1G', 'BTC_Degisim_7G',
+    'DXY_Degisim', 'US10Y_Baski', 'US5Y_Degisim',
+    'VIX_Seviye', 'SP500_Degisim', 'Nasdaq_Degisim',
+    'Altin_Degisim', 'Petrol_Degisim', 'Bakir_Degisim'
+]
 
 
-# --- VERİ ÇEKME ---
+# --- VERİ ÇEKME VE ÖZELLİK MÜHENDİSLİĞİ ---
 @st.cache_data(ttl=300)
 def veri_getir():
-    semboller = ['BTC-USD', 'DX-Y.NYB', '^TNX', '^VIX', '^GSPC']
+    semboller = {
+        'BTC': 'BTC-USD',
+        'DXY': 'DX-Y.NYB',
+        'US10Y': '^TNX',
+        'US5Y': '^FVX',
+        'VIX': '^VIX',
+        'SP500': '^GSPC',
+        'Nasdaq': '^NDX',
+        'Altin': 'GC=F',
+        'Petrol': 'CL=F',
+        'Bakir': 'HG=F'
+    }
+
     veri_sozlugu = {}
-    for sembol in semboller:
-        df_temp = yf.download(sembol, period='60d', interval='1d', progress=False)
+    for isim, sembol in semboller.items():
+        df_temp = yf.download(sembol, period='100d', interval='1d', progress=False)
         if isinstance(df_temp.columns, pd.MultiIndex):
             df_temp.columns = df_temp.columns.droplevel(1)
-        veri_sozlugu[sembol] = df_temp['Close']
+        veri_sozlugu[isim] = df_temp['Close']
 
-    df_makro = pd.DataFrame(veri_sozlugu).ffill()
-    df_makro.columns = ['BTC', 'DXY', 'US10Y', 'VIX', 'SP500']
+    df = pd.DataFrame(veri_sozlugu).ffill()
 
-    df_makro['BTC_SMA_20'] = df_makro['BTC'].rolling(window=20).mean()
-    df_makro['BTC_Degisim_1_Gun'] = df_makro['BTC'].pct_change(periods=1)
-    df_makro['BTC_Degisim_7_Gun'] = df_makro['BTC'].pct_change(periods=7)
-    df_makro['DXY_Degisim'] = df_makro['DXY'].pct_change(periods=1)
-    df_makro['US10Y_Baski'] = df_makro['US10Y'] - df_makro['US10Y'].rolling(window=10).mean()
-    df_makro['VIX_Risk_Durumu'] = (df_makro['VIX'] > 20).astype(int)
-    df_makro['SP500_Degisim'] = df_makro['SP500'].pct_change(periods=1)
+    df['BTC_SMA_20'] = df['BTC'].rolling(window=20).mean()
+    df['BTC_Degisim_1G'] = df['BTC'].pct_change(periods=1)
+    df['BTC_Degisim_7G'] = df['BTC'].pct_change(periods=7)
+
+    df['DXY_Degisim'] = df['DXY'].pct_change(periods=1)
+    df['US10Y_Baski'] = df['US10Y'] - df['US10Y'].rolling(window=10).mean()
+    df['US5Y_Degisim'] = df['US5Y'].pct_change(periods=1)
+    df['VIX_Seviye'] = (df['VIX'] > 20).astype(int)
+    df['SP500_Degisim'] = df['SP500'].pct_change(periods=1)
+    df['Nasdaq_Degisim'] = df['Nasdaq'].pct_change(periods=1)
+    df['Altin_Degisim'] = df['Altin'].pct_change(periods=1)
+    df['Petrol_Degisim'] = df['Petrol'].pct_change(periods=1)
+    df['Bakir_Degisim'] = df['Bakir'].pct_change(periods=1)
 
     df_saatlik = yf.download('BTC-USD', period='7d', interval='1h', progress=False)
     if isinstance(df_saatlik.columns, pd.MultiIndex):
         df_saatlik.columns = df_saatlik.columns.droplevel(1)
 
-    return df_makro.dropna().iloc[-1:], df_saatlik
+    return df.dropna().iloc[-1:], df_saatlik
 
 
 # --- GRAFİK ÇİZİM FONKSİYONU ---
@@ -151,26 +172,27 @@ def grafik_ciz(df_saatlik, aktif_gecmis):
 
 
 # --- ANA EKRAN YÜKLEMESİ ---
-if st.button("🔄 Piyasayı Analiz Et (Verileri Güncelle)", use_container_width=True):
-    with st.spinner('Makro veriler, piyasa skoru ve saatlik mumlar analiz ediliyor...'):
+if st.button("🔄 Piyasayı Analiz Et (10 Makro Veri)", use_container_width=True):
+    with st.spinner('10 küresel makro gösterge ve yapay zeka modeli analiz ediliyor...'):
         son_durum_makro, df_saatlik = veri_getir()
 
         btc_fiyat = float(df_saatlik['Close'].iloc[-1])
         son_saat = df_saatlik.index[-1]
 
-        # 1. MAKRO PANO
-        st.subheader("🌍 Mahşerin 4 Atlısı (Makro Göstergeler)")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Bitcoin (Anlık)", f"${btc_fiyat:,.2f}")
-        m2.metric("Korku Endeksi (VIX)", f"{float(son_durum_makro['VIX'].iloc[0]):.2f}")
-        m3.metric("Dolar Endeksi (DXY)", f"{float(son_durum_makro['DXY'].iloc[0]):.2f}")
-        m4.metric("10 Yıllık Tahvil", f"%{float(son_durum_makro['US10Y'].iloc[0]):.2f}")
+        # 1. MAKRO PANO (Önemli Göstergeler)
+        st.subheader("🌍 10'lu Küresel Makro Pano")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Bitcoin", f"${btc_fiyat:,.2f}")
+        m2.metric("Nasdaq", f"{float(son_durum_makro['Nasdaq'].iloc[0]):,.1f}")
+        m3.metric("DXY", f"{float(son_durum_makro['DXY'].iloc[0]):.2f}")
+        m4.metric("10Y Tahvil", f"%{float(son_durum_makro['US10Y'].iloc[0]):.2f}")
+        m5.metric("VIX", f"{float(son_durum_makro['VIX'].iloc[0]):.2f}")
         st.divider()
 
         model_girdisi = son_durum_makro[ozellik_kolonlari]
         karar = model.predict(model_girdisi)[0]
 
-        # ACİL DURUM SİGORTASI: ZARAR KES (STOP-LOSS %5)
+        # ACİL DURUM SİGORTASI: ZARAR KES (%5)
         acil_satis_yapildi_mi = False
         if btc > 0 and son_alim_fiyati > 0:
             zarar_orani = (btc_fiyat - son_alim_fiyati) / son_alim_fiyati
@@ -182,7 +204,7 @@ if st.button("🔄 Piyasayı Analiz Et (Verileri Güncelle)", use_container_widt
                 islem_gecmisi.append({
                     'Tarih': son_saat, 'Tip': 'SAT (STOP-LOSS)', 'Fiyat': btc_fiyat, 'Tutar': satilacak_tutar
                 })
-                st.error("🚨 STOP-LOSS PATLADI! Ani düşüş sebebiyle tüm pozisyon acilen satıldı.")
+                st.error("🚨 STOP-LOSS PATLADI! Acil tam çıkış yapıldı.")
                 acil_satis_yapildi_mi = True
 
         durum_mesaji = ""
@@ -192,12 +214,14 @@ if st.button("🔄 Piyasayı Analiz Et (Verileri Güncelle)", use_container_widt
                 vix_val = float(son_durum_makro['VIX'].iloc[0])
                 dxy_degisimi = float(son_durum_makro['DXY_Degisim'].iloc[0])
                 us10y_baski = float(son_durum_makro['US10Y_Baski'].iloc[0])
-                btc_7d = float(son_durum_makro['BTC_Degisim_7_Gun'].iloc[0])
+                nasdaq_deg = float(son_durum_makro['Nasdaq_Degisim'].iloc[0])
+                btc_7d = float(son_durum_makro['BTC_Degisim_7G'].iloc[0])
 
                 puan = 0
-                if vix_val < 18: puan += 1
+                if vix_val < 20: puan += 1
                 if dxy_degisimi < 0: puan += 1
                 if us10y_baski <= 0: puan += 1
+                if nasdaq_deg > 0: puan += 1
                 if btc_7d > 0.02: puan += 1
 
                 if puan >= 4:
@@ -206,7 +230,7 @@ if st.button("🔄 Piyasayı Analiz Et (Verileri Güncelle)", use_container_widt
                 elif puan == 3:
                     carpan = 1.5
                     durum_mesaji = "📈 Oldukça Olumlu (1.5X Giriş)"
-                elif puan == 2:
+                elif puan >= 2:
                     carpan = 1.0
                     durum_mesaji = "⚖️ Dengeli / Normal (1X Giriş)"
                 else:
@@ -224,9 +248,9 @@ if st.button("🔄 Piyasayı Analiz Et (Verileri Güncelle)", use_container_widt
                     islem_gecmisi.append({
                         'Tarih': son_saat, 'Tip': f'AL ({durum_mesaji})', 'Fiyat': btc_fiyat, 'Tutar': alinacak_tutar
                     })
-                    st.toast(f'Akıllı Alım Yapıldı! Tutar: ${alinacak_tutar:,.0f} ({durum_mesaji})', icon='✅')
+                    st.toast(f'10 Makro Destekli Alım! Tutar: ${alinacak_tutar:,.0f}', icon='✅')
 
-            # B. KADEMELİ SATIŞ MANTIĞI
+            # B. KADEMELİ SATIŞ MANTIĞI (%50)
             elif karar == 0 and btc > 0.0001:
                 satilacak_btc_miktari = btc * 0.50
                 satilacak_tutar = satilacak_btc_miktari * btc_fiyat
@@ -246,7 +270,7 @@ if st.button("🔄 Piyasayı Analiz Et (Verileri Güncelle)", use_container_widt
                 })
                 st.toast(f'Kademeli Satış Yapıldı! Tutar: ${satilacak_tutar:,.0f}', icon='🔴')
 
-        # Güncel cüzdan durumunu doğrudan GitHub deposuna kaydet
+        # Güncel cüzdanı GitHub'a kaydet
         github_veri_kaydet(nakit, btc, islem_gecmisi, son_alim_fiyati)
 
         # --- ARAYÜZ YERLEŞİMİ ---
@@ -254,7 +278,7 @@ if st.button("🔄 Piyasayı Analiz Et (Verileri Güncelle)", use_container_widt
 
         with col_grafik:
             if karar == 1:
-                st.success(f"💡 SİNYAL: AL | Piyasa Durumu: {durum_mesaji}")
+                st.success(f"💡 SİNYAL: AL | Piyasa Skoru: {durum_mesaji}")
             else:
                 st.warning("⏳ SİNYAL: BEKLE VEYA KADEMELİ SATIŞ AKTİF")
 
@@ -314,7 +338,7 @@ else:
 
     with col_grafik:
         st.info(
-            "👆 Botun hafızası GitHub'a bağlandı! Piyasayı analiz etmek ve işlemleri güncellemek için yukarıdaki butona tıklayın.")
+            "👆 10'lu makro bot aktif! Piyasayı analiz etmek ve işlemleri güncellemek için yukarıdaki butona tıklayın.")
 
 time.sleep(3600)
 st.rerun()
