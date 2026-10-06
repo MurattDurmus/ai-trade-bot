@@ -1,0 +1,30 @@
+name: 7/24 AI Trade Motoru
+
+on:
+  schedule:
+    - cron: '0 * * * *' 
+  workflow_dispatch: 
+
+jobs:
+  motoru_calistir:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Depoyu Klonla
+      uses: actions/checkout@v3
+
+    - name: Python Kurulumu (V 3.10)
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Kütüphaneleri Yükle
+      run: |
+        pip install pandas yfinance xgboost scikit-learn requests
+
+    - name: Botu Çalıştır (motor.py)
+      env:
+        GH_TOKEN: ${{ secrets.GH_PAT }}
+        GH_REPO: ${{ secrets.GH_REPO }}
+      run: |
+        python motor.py
