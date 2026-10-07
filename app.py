@@ -75,7 +75,6 @@ def cuzdan_sifirla():
         st.error(f"GitHub kayıt hatası: {e}")
 
 
-# Verileri Çek
 nakit, btc, islem_gecmisi, son_alim_fiyati = github_veri_oku()
 
 # --- YAN MENÜ (SIDEBAR) & AYARLAR ---
@@ -87,37 +86,64 @@ with st.sidebar:
         cuzdan_sifirla()
 
 
-# --- ANLIK FİYAT VE GRAFİK İÇİN HAFİF VERİ ÇEKİMİ ---
+# --- HAFİF VERİ ÇEKİMİ (MAkro + Haberler Eklendi) ---
 @st.cache_data(ttl=60)
 def btc_fiyat_getir():
+    # 1. BTC Saatlik Fiyatlar
     df = yf.download('BTC-USD', period='7d', interval='1h', progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.droplevel(1)
 
-    # Makro verileri çek
+    # 2. Makro Veriler (Ortalama hesabı için 60 günlük çekiyoruz)
     semboller = {'DXY': 'DX-Y.NYB', 'US10Y': '^TNX', 'VIX': '^VIX'}
     veri_sozlugu = {}
     for isim, sembol in semboller.items():
-        df_temp = yf.download(sembol, period='5d', interval='1d', progress=False)
+        df_temp = yf.download(sembol, period='60d', interval='1d', progress=False)
         if isinstance(df_temp.columns, pd.MultiIndex):
             df_temp.columns = df_temp.columns.droplevel(1)
         veri_sozlugu[isim] = df_temp['Close']
     df_makro = pd.DataFrame(veri_sozlugu).ffill()
 
-    return df, df_makro
+    # 3. Yabancı Kaynaklardan Canlı Kripto Haberleri
+    haberler = []
+    try:
+        btc_ticker = yf.Ticker("BTC-USD")
+        haberler = btc_ticker.news[:3]  # Son 3 haberi al
+    except:
+        pass
+
+    return df, df_makro, haberler
 
 
-df_saatlik, df_makro = btc_fiyat_getir()
+df_saatlik, df_makro, haberler = btc_fiyat_getir()
 anlik_fiyat = float(df_saatlik['Close'].iloc[-1])
 toplam_varlik = nakit + (btc * anlik_fiyat)
 kar_zarar = toplam_varlik - 10000.0
 
-# --- PİYASA HAVASI VE NOTU (YENİ EKLENEN BÖLÜM) ---
+# --- PİYASA HAVASI VE CANLI HABER RADARI ---
 dxy_anlik = float(df_makro['DXY'].iloc[-1])
 dxy_degisim = (dxy_anlik - float(df_makro['DXY'].iloc[-2])) / float(df_makro['DXY'].iloc[-2]) * 100
+dxy_ort = float(df_makro['DXY'].mean())
 
 vix_anlik = float(df_makro['VIX'].iloc[-1])
+vix_ort = float(df_makro['VIX'].mean())
+
 us10y_anlik = float(df_makro['US10Y'].iloc[-1])
+us10y_ort = float(df_makro['US10Y'].mean())
+
+
+# Makro Göstergeleri Kıyaslama Fonksiyonu
+def kiyasla_ve_yazdir(anlik, ortalama):
+    fark = ((anlik - ortalama) / ortalama) * 100
+    if fark > 5:
+        return f"🔴 Epey Üzerinde (Ort: {ortalama:.2f})"
+    elif fark > 0:
+        return f"🟠 Üzerinde (Ort: {ortalama:.2f})"
+    elif fark > -5:
+        return f"🟢 Altında (Ort: {ortalama:.2f})"
+    else:
+        return f"🔵 Epey Altında (Ort: {ortalama:.2f})"
+
 
 piyasa_durumu = ""
 renk = ""
@@ -140,15 +166,50 @@ else:
     ikon = "⏳"
     detay_not = "Piyasa şu an bir kırılım noktasında ve yatay sıkışma (konsolidasyon) sürecinde. Makro veriler karışık sinyaller veriyor; FOMC tutanakları, PMI verileri ve jeopolitik gelişmeler yakından izleniyor. Sistem şu anda fırsat kolluyor, olası bir likidite avına veya stop patlatma (squeeze) hareketine karşı kasanın büyük bölümünü nakitte tutarak güvenliği ön planda tutuyor."
 
+# 24 Saatlik Sert Fiyat Hareketi ve Haber Algılayıcı
+btc_degisim_24s = (anlik_fiyat - float(df_saatlik['Close'].iloc[-24])) / float(df_saatlik['Close'].iloc[-24]) * 100
+haber_kutusu = ""
+
+if abs(btc_degisim_24s) >= 2.5:  # Yüzde 2.5 ve üzeri bir hareket varsa radarı tetikle
+    hareket_tipi = "🚨 SERT DÜŞÜŞ" if btc_degisim_24s < 0 else "🚀 GÜÇLÜ YÜKSELİŞ"
+    renk_kodu = "rgba(255, 75, 75, 0.15)" if btc_degisim_24s < 0 else "rgba(0, 204, 150, 0.15)"
+    cerceve = "#ff4b4b" if btc_degisim_24s < 0 else "#00cc96"
+
+    haber_linkleri = "".join([
+                                 f"<li><a href='{h.get('link', '#')}' target='_blank' style='color:#4da6ff; text-decoration:none;'>{h.get('title', 'Haber Başlığı')}</a> <span style='color:gray; font-size:12px;'>({h.get('publisher', 'Kaynak')})</span></li>"
+                                 for h in haberler if 'title' in h])
+
+    if haber_linkleri:
+        haber_kutusu = f"""
+        <div style='margin-top: 15px; padding:15px; border-radius:10px; border-left: 5px solid {cerceve}; background-color: {renk_kodu};'>
+            <b>{hareket_tipi} ALARMI (Son 24H: %{btc_degisim_24s:.2f})</b><br>
+            Piyasadaki bu ani hareketlenmeyle ilişkili olabilecek son global gelişmeler (İngilizce Kaynaklar):
+            <ul style='margin-top:5px; margin-bottom:0;'>
+                {haber_linkleri}
+            </ul>
+        </div>
+        """
+
 with st.expander(f"{ikon} **GÜNCEL PİYASA DURUMU: {piyasa_durumu}**", expanded=True):
     st.markdown(
         f"<div style='padding:15px; border-radius:10px; border-left: 5px solid {'#ff4b4b' if renk == 'error' else '#00cc96' if renk == 'success' else '#ffcc00'}; background-color: rgba(255,255,255,0.05);'>{detay_not}</div>",
         unsafe_allow_html=True)
 
+    # Eğer sert hareket varsa flaş haber kutusunu göster
+    if haber_kutusu != "":
+        st.markdown(haber_kutusu, unsafe_allow_html=True)
+
+    st.write("")  # Görsel Boşluk
+
     col_m1, col_m2, col_m3 = st.columns(3)
     col_m1.metric("Dolar Endeksi (DXY)", f"{dxy_anlik:.2f}", f"{dxy_degisim:.2f}%", delta_color="inverse")
+    col_m1.caption(kiyasla_ve_yazdir(dxy_anlik, dxy_ort))
+
     col_m2.metric("Korku Endeksi (VIX)", f"{vix_anlik:.2f}")
+    col_m2.caption(kiyasla_ve_yazdir(vix_anlik, vix_ort))
+
     col_m3.metric("ABD 10Y Tahvil", f"%{us10y_anlik:.2f}")
+    col_m3.caption(kiyasla_ve_yazdir(us10y_anlik, us10y_ort))
 
 st.divider()
 
