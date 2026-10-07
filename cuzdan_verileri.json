@@ -1,6 +1,6 @@
 {
-    "nakit": 7605.197981006362,
-    "btc": 0.028138795435665248,
+    "nakit": 6605.197981006362,
+    "btc": 0.04001527999623532,
     "islem_gecmisi": [
         {
             "Tarih": "2026-10-07T00:00:00+00:00",
@@ -31,7 +31,13 @@
             "Tip": "AL (⚖️ Dengeli / Normal (1X Giriş))",
             "Fiyat": 84150.0,
             "Tutar": 1000.0
+        },
+        {
+            "Tarih": "2026-10-07T07:00:00+00:00",
+            "Tip": "AL (⚖️ Dengeli / Normal (1X Giriş))",
+            "Fiyat": 84200.0,
+            "Tutar": 1000.0
         }
     ],
-    "son_alim_fiyati": 84150.0
+    "son_alim_fiyati": 84200.0
 }
