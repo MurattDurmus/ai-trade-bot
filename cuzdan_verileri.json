@@ -1,6 +1,13 @@
 {
-    "nakit": 10000.0,
-    "btc": 0.0,
-    "islem_gecmisi": [],
-    "son_alim_fiyati": 0.0
+    "nakit": 9500.0,
+    "btc": 0.005984190330165546,
+    "islem_gecmisi": [
+        {
+            "Tarih": "2026-10-07T16:00:00+00:00",
+            "Tip": "AL (1 Puan)",
+            "Fiyat": 83553.4921875,
+            "Tutar": 500.0
+        }
+    ],
+    "son_alim_fiyati": 83553.4921875
 }
