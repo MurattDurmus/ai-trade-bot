@@ -1,6 +1,13 @@
 {
-    "nakit": 10000.0,
-    "btc": 0.0,
-    "islem_gecmisi": [],
-    "son_alim_fiyati": 0.0
+    "nakit": 8500.0,
+    "btc": 0.01754693004121244,
+    "islem_gecmisi": [
+        {
+            "Tarih": "2026-10-07T00:00:00+00:00",
+            "Tip": "AL (📈 Oldukça Olumlu (1.5X Giriş))",
+            "Fiyat": 85485.0390625,
+            "Tutar": 1500.0
+        }
+    ],
+    "son_alim_fiyati": 85485.0390625
 }
