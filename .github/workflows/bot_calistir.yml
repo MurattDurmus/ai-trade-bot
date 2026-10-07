@@ -20,7 +20,7 @@ jobs:
 
     - name: Kütüphaneleri Yükle
       run: |
-        pip install pandas yfinance xgboost scikit-learn requests
+        pip install pandas yfinance xgboost scikit-learn requests vaderSentiment
 
     - name: Botu Çalıştır (motor.py)
       env:
