@@ -6,13 +6,14 @@ from datetime import datetime
 import requests
 import base64
 import json
+import time
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="AI Trade Dashboard", page_icon="📊", layout="wide")
 st.title("📊 AI Trade Gösterge Paneli (7/24 Otonom)")
 
 
-# --- GİTHUB'DAN SADECE OKUMA İŞLEMİ ---
+# --- GİTHUB BAĞLANTI FONKSİYONLARI ---
 def github_veri_oku():
     try:
         token = st.secrets["GITHUB_TOKEN"]
@@ -34,7 +35,58 @@ def github_veri_oku():
     return 10000.0, 0.0, [], 0.0
 
 
+def cuzdan_sifirla():
+    try:
+        token = st.secrets["GITHUB_TOKEN"]
+        repo = st.secrets["GITHUB_REPO"]
+        url = f"https://api.github.com/repos/{repo}/contents/cuzdan_verileri.json"
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # Dosyanın mevcut SHA kodunu al (Üzerine yazabilmek için şart)
+        sha = None
+        resp_get = requests.get(url, headers=headers)
+        if resp_get.status_code == 200:
+            sha = resp_get.json().get("sha")
+
+        # Tertemiz başlangıç verisi
+        veri = {
+            "nakit": 10000.0,
+            "btc": 0.0,
+            "islem_gecmisi": [],
+            "son_alim_fiyati": 0.0
+        }
+
+        json_str = json.dumps(veri, ensure_ascii=False, indent=4)
+        encoded_content = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
+
+        data = {
+            "message": "🔄 Sistem Sıfırlandı (Kullanıcı Talebi)",
+            "content": encoded_content
+        }
+        if sha:
+            data["sha"] = sha
+
+        res = requests.put(url, headers=headers, json=data)
+        if res.status_code in [200, 201]:
+            st.success("✅ Cüzdan başarıyla 10.000$ başlangıç durumuna sıfırlandı!")
+            time.sleep(2)
+            st.rerun()
+        else:
+            st.error("❌ Sıfırlama başarısız oldu!")
+    except Exception as e:
+        st.error(f"GitHub kayıt hatası: {e}")
+
+
+# Verileri Çek
 nakit, btc, islem_gecmisi, son_alim_fiyati = github_veri_oku()
+
+# --- YAN MENÜ (SIDEBAR) & AYARLAR ---
+with st.sidebar:
+    st.header("⚙️ Sistem Ayarları")
+    st.write("Eğer veriler bozulursa veya testi baştan başlatmak isterseniz aşağıdaki butonu kullanabilirsiniz.")
+    st.divider()
+    if st.button("⚠️ Cüzdanı Sıfırla (Reset)", use_container_width=True):
+        cuzdan_sifirla()
 
 
 # --- ANLIK FİYAT VE GRAFİK İÇİN HAFİF VERİ ÇEKİMİ ---
