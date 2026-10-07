@@ -42,13 +42,11 @@ def cuzdan_sifirla():
         url = f"https://api.github.com/repos/{repo}/contents/cuzdan_verileri.json"
         headers = {"Authorization": f"Bearer {token}"}
 
-        # Dosyanın mevcut SHA kodunu al (Üzerine yazabilmek için şart)
         sha = None
         resp_get = requests.get(url, headers=headers)
         if resp_get.status_code == 200:
             sha = resp_get.json().get("sha")
 
-        # Tertemiz başlangıç verisi
         veri = {
             "nakit": 10000.0,
             "btc": 0.0,
@@ -95,15 +93,66 @@ def btc_fiyat_getir():
     df = yf.download('BTC-USD', period='7d', interval='1h', progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.droplevel(1)
-    return df
+
+    # Makro verileri çek
+    semboller = {'DXY': 'DX-Y.NYB', 'US10Y': '^TNX', 'VIX': '^VIX'}
+    veri_sozlugu = {}
+    for isim, sembol in semboller.items():
+        df_temp = yf.download(sembol, period='5d', interval='1d', progress=False)
+        if isinstance(df_temp.columns, pd.MultiIndex):
+            df_temp.columns = df_temp.columns.droplevel(1)
+        veri_sozlugu[isim] = df_temp['Close']
+    df_makro = pd.DataFrame(veri_sozlugu).ffill()
+
+    return df, df_makro
 
 
-df_saatlik = btc_fiyat_getir()
+df_saatlik, df_makro = btc_fiyat_getir()
 anlik_fiyat = float(df_saatlik['Close'].iloc[-1])
 toplam_varlik = nakit + (btc * anlik_fiyat)
 kar_zarar = toplam_varlik - 10000.0
 
-# --- ARAYÜZ YERLEŞİMİ ---
+# --- PİYASA HAVASI VE NOTU (YENİ EKLENEN BÖLÜM) ---
+dxy_anlik = float(df_makro['DXY'].iloc[-1])
+dxy_degisim = (dxy_anlik - float(df_makro['DXY'].iloc[-2])) / float(df_makro['DXY'].iloc[-2]) * 100
+
+vix_anlik = float(df_makro['VIX'].iloc[-1])
+us10y_anlik = float(df_makro['US10Y'].iloc[-1])
+
+piyasa_durumu = ""
+renk = ""
+ikon = ""
+detay_not = ""
+
+if dxy_degisim > 0 and us10y_anlik > 4.20:
+    piyasa_durumu = "TEHLİKELİ / BASKILI"
+    renk = "error"
+    ikon = "🚨"
+    detay_not = "Güçlü Dolar (DXY) ve yüksek ABD Tahvil Faizleri kripto piyasası üzerinde ciddi bir baskı oluşturuyor. Son günlerde spot Bitcoin ETF'lerindeki çıkışlar ve yaklaşan ABD bilanço sezonu belirsizliği, kurumsal talebi zayıflattı. Bu makroekonomik fırtına dinene kadar yapay zeka muhtemelen nakitte kalmayı (beklemeyi) veya çok düşük tutarlı temkinli alımlar yapmayı seçecektir. Likidite havuzlarında aşağı yönlü sarkmalar yaşanabilir."
+elif vix_anlik < 18 and dxy_degisim < 0:
+    piyasa_durumu = "OLUMLU / RİSK İŞTAHI YÜKSEK"
+    renk = "success"
+    ikon = "🟢"
+    detay_not = "Piyasada korku endeksi (VIX) sakin ve Dolar Endeksi (DXY) geri çekiliyor. Bu durum riskli varlıklara (Bitcoin ve Altcoinler) doğru bir sermaye akışı sağlıyor. 80.000$ psikolojik desteğinin güçlü kalması ve faiz beklentilerindeki yumuşama, yükseliş trendini destekliyor. Yapay zeka bu koşullarda daha agresif 'AL' sinyalleri üretebilir ve portföydeki BTC ağırlığını artırabilir."
+else:
+    piyasa_durumu = "TEMKİNLİ / YÖN ARAYIŞI"
+    renk = "warning"
+    ikon = "⏳"
+    detay_not = "Piyasa şu an bir kırılım noktasında ve yatay sıkışma (konsolidasyon) sürecinde. Makro veriler karışık sinyaller veriyor; FOMC tutanakları, PMI verileri ve jeopolitik gelişmeler yakından izleniyor. Sistem şu anda fırsat kolluyor, olası bir likidite avına veya stop patlatma (squeeze) hareketine karşı kasanın büyük bölümünü nakitte tutarak güvenliği ön planda tutuyor."
+
+with st.expander(f"{ikon} **GÜNCEL PİYASA DURUMU: {piyasa_durumu}**", expanded=True):
+    st.markdown(
+        f"<div style='padding:15px; border-radius:10px; border-left: 5px solid {'#ff4b4b' if renk == 'error' else '#00cc96' if renk == 'success' else '#ffcc00'}; background-color: rgba(255,255,255,0.05);'>{detay_not}</div>",
+        unsafe_allow_html=True)
+
+    col_m1, col_m2, col_m3 = st.columns(3)
+    col_m1.metric("Dolar Endeksi (DXY)", f"{dxy_anlik:.2f}", f"{dxy_degisim:.2f}%", delta_color="inverse")
+    col_m2.metric("Korku Endeksi (VIX)", f"{vix_anlik:.2f}")
+    col_m3.metric("ABD 10Y Tahvil", f"%{us10y_anlik:.2f}")
+
+st.divider()
+
+# --- ARAYÜZ YERLEŞİMİ (Devamı) ---
 st.info(
     "ℹ️ Bu panel sadece izleme amaçlıdır. Alım-Satım kararları ve işlemler arka planda GitHub Actions sunucularında her saat başı otonom olarak yapılmaktadır.")
 
@@ -128,14 +177,14 @@ with col_grafik:
     )])
 
     for islem in islem_gecmisi:
-        renk = '#00ff00' if 'AL' in islem['Tip'] else '#ff0000'
+        islem_renk = '#00ff00' if 'AL' in islem['Tip'] else '#ff0000'
         sembol = 'triangle-up' if 'AL' in islem['Tip'] else 'triangle-down'
         konum = 'bottom center' if 'AL' in islem['Tip'] else 'top center'
         metin = f"{islem['Tip']}<br>${islem['Fiyat']:,.0f}"
 
         fig.add_trace(go.Scatter(
             x=[islem['Tarih']], y=[islem['Fiyat']], mode='markers+text',
-            marker=dict(symbol=sembol, size=14, color=renk, line=dict(width=1, color='white')),
+            marker=dict(symbol=sembol, size=14, color=islem_renk, line=dict(width=1, color='white')),
             text=[metin], textposition=konum, name=islem['Tip'], showlegend=False
         ))
 
@@ -149,8 +198,8 @@ with col_hesap:
         st.write("Henüz otonom işlem yapılmadı.")
     else:
         for islem in reversed(islem_gecmisi):
-            renk = "🟢" if "AL" in islem['Tip'] else "🔴"
+            islem_renk_ikon = "🟢" if "AL" in islem['Tip'] else "🔴"
             zaman = islem['Tarih'].strftime("%d %b %H:%M")
-            with st.expander(f"{renk} {islem['Tip']} - {zaman}"):
+            with st.expander(f"{islem_renk_ikon} {islem['Tip']} - {zaman}"):
                 st.write(f"**Fiyat:** ${islem['Fiyat']:,.2f}")
                 st.write(f"**Tutar:** ${islem['Tutar']:,.2f}")
