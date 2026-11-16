@@ -21,9 +21,10 @@ jobs:
         with:
           python-version: "3.11"
       - name: Kutuphaneler
-        run: pip install pandas numpy requests yfinance xgboost vaderSentiment
+        run: pip install pandas numpy requests yfinance xgboost scikit-learn vaderSentiment
       - name: Motor
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          PYTHONUNBUFFERED: "1"
         run: python motor.py
