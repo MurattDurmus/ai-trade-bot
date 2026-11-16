@@ -1,6 +1,6 @@
 {
-    "nakit": 9706.260774872519,
-    "btc": 0.008742357069734542,
+    "nakit": 10277.582988854594,
+    "btc": 0.0,
     "islem_gecmisi": [
         {
             "Tarih": "2026-10-07T16:00:00+00:00",
@@ -805,7 +805,34 @@
             "Tip": "AL (1 Puan)",
             "Fiyat": 75727.1484375,
             "Tutar": 500.0
+        },
+        {
+            "Tarih": "2026-11-15T23:59:00",
+            "Tip": "SAT (Zarar kes (son alımdan %5 düşüş))",
+            "Fiyat": 65351.05,
+            "Tutar": 571.3222139820756
         }
     ],
-    "son_alim_fiyati": 75727.1484375
+    "son_alim_fiyati": 0.0,
+    "son_durum": {
+        "aylik_cizgi": 63702.99054242424,
+        "aylik_yesil": true,
+        "aylik_onceki_yesil": true,
+        "aylik_kapanis": 77582.02,
+        "aylik_son_mum": "2026-10-31",
+        "haftalik_cizgi": 82145.0077839827,
+        "haftalik_yesil": false,
+        "haftalik_onceki_yesil": false,
+        "haftalik_kapanis": 65351.05,
+        "haftalik_son_mum": "2026-11-15",
+        "atr": 2537.8248609216234,
+        "kapanis": 65351.05,
+        "onceki_kapanis": 64150.0,
+        "gun": "2026-11-15",
+        "model": 1,
+        "haber": -0.087,
+        "karar": "SAT_HEPSI",
+        "gerekce": "Zarar kes (son alımdan %5 düşüş)",
+        "calisma": "2026-11-16T18:51+00:00"
+    }
 }
