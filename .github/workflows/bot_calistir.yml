@@ -1,30 +1,29 @@
-name: 7/24 AI Trade Motoru
+name: Gunluk AI Trade Motoru
 
 on:
   schedule:
-    - cron: '0 * * * *' 
-  workflow_dispatch: 
+    - cron: "15 0 * * *"      # her gün 00:15 UTC = 03:15 TSİ (BTC günlük mumu 00:00 UTC'de kapanır)
+  workflow_dispatch:           # Actions sekmesinden elle çalıştırmak için
+
+permissions:
+  contents: write              # motor cüzdan dosyasını aynı depoya yazar; ayrı bir token gerekmez
+
+concurrency:
+  group: motor
+  cancel-in-progress: false
 
 jobs:
-  motoru_calistir:
+  calistir:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Depoyu Klonla
-      uses: actions/checkout@v3
-
-    - name: Python Kurulumu (V 3.10)
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
-
-    - name: Kütüphaneleri Yükle
-      run: |
-        pip install pandas yfinance xgboost scikit-learn requests vaderSentiment
-
-    - name: Botu Çalıştır (motor.py)
-      env:
-        GH_TOKEN: ${{ secrets.GH_PAT }}
-        GH_REPO: ${{ secrets.GH_REPO }}
-      run: |
-        python motor.py
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Kutuphaneler
+        run: pip install pandas numpy requests yfinance xgboost vaderSentiment
+      - name: Motor
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: python motor.py
