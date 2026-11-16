@@ -1,210 +1,320 @@
-import os
-import pandas as pd
-import yfinance as yf
-from xgboost import XGBClassifier
-from datetime import datetime
-import requests
+"""
+ai-trade-bot — günlük motor (düzeltilmiş sürüm, 16 Kasım 2026)
+
+Önceki sürümden iki temel fark:
+  1) CDLTRD artık gerçek tanımıyla hesaplanıyor: kapanışların HullMA 20'si (TradingView "CDLTRD v0.5 by JustUncleL").
+     Eski kodda bunun yerine Chandelier Exit (22 günün en yükseği − 3×ATR) kullanılıyordu.
+     Renk: çizgi bir önceki kapanmış muma göre yükseliyorsa yeşil, düşüyorsa kırmızı.
+     Aylık ve haftalık değerler yalnızca KAPANMIŞ mumlardan okunur.
+  2) Motor saatte bir değil, günde bir kez çalışır (BTC günlük mumu kapandıktan sonra, 03:15 TSİ).
+     Model günlük verilerle eğitildiği için saatlik çalışmada gün boyu aynı kararı tekrarlıyor ve
+     "kademeli" alım satımı birkaç saate sıkıştırıyordu.
+
+Karar akışı (her gün bir kez, dünün kapanışına göre):
+  A) ACİL ÇIKIŞ (hepsini sat)
+     - son alım fiyatından %5 düşüş (zarar kes), ya da
+     - haber skoru −0,40'ın altında (kötü haber kalkanı), ya da
+     - haftalık CDLTRD kırmızı (kapanmış hafta), ya da
+     - hibrit stop: biten hafta haftalık çizginin altında kapandı / son 2 gün çizginin altında kapandı /
+       kapanış çizginin 1 ATR'den fazla altında
+  B) TEMKİN (yarısını sat, alım yok)
+     - günlük kapanış haftalık çizginin altına ilk kez indi (hibrit stop 1. evre)
+  C) ALIM (aşağıdakilerin hepsi doğruysa)
+     - aylık ve haftalık CDLTRD yeşil, günlük kapanış haftalık çizginin üstünde
+     - XGBoost modeli "AL" (1) diyor
+     - haber skoru −0,40'tan iyi
+     Tutar: 1.000 $ × makro çarpan (0,5 / 1 / 1,5 / 2; beş maddelik puana göre), haberler çok iyiyse × 1,5.
+  Model "BEKLE" (0) derse artık satış yapılmaz, yalnızca alım yapılmaz. Satışlar CDLTRD ve acil çıkış kurallarından gelir.
+
+Cüzdan dosyası (cuzdan_verileri.json) eskisiyle aynı biçimde; app.py değiştirilmeden okuyabilir.
+Ek olarak "son_durum" alanına her günün göstergeleri yazılır (karar şeffaf olsun diye).
+
+Çalıştırma:
+  GitHub Actions: .github/workflows/bot_calistir.yml (günde bir)
+  Yerel deneme : python motor.py --kuru      (karar verir, ekrana yazar, GitHub'a hiçbir şey kaydetmez)
+Not: Sanal (kağıt üstünde) işlem yapar. Gerçek emir göndermez. Yatırım tavsiyesi değildir.
+"""
+import argparse
 import base64
 import json
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import math
+import os
+from datetime import datetime, timezone
 
-print("🤖 [MOTOR BAŞLADI] 7/24 AI Trade Botu uyanıyor...")
+import numpy as np
+import pandas as pd
+import requests
 
-# 1. GitHub Ayarları
-GITHUB_TOKEN = os.environ.get("GH_TOKEN")
-GITHUB_REPO = os.environ.get("GH_REPO")
+HMA_UZ = 20
+ATR_UZ = 22
+BASLANGIC_NAKIT = 10000.0
+TEMEL_ALIM = 1000.0
+ZARAR_KES = -0.05
+HABER_KOTU, HABER_IYI = -0.40, 0.40
+DOSYA = "cuzdan_verileri.json"
+OZELLIKLER = ['BTC_SMA_20', 'BTC_Degisim_1G', 'BTC_Degisim_7G', 'DXY_Degisim', 'US10Y_Baski', 'US5Y_Degisim',
+              'VIX_Seviye', 'SP500_Degisim', 'Nasdaq_Degisim', 'Altin_Degisim', 'Petrol_Degisim', 'Bakir_Degisim']
+MAKRO = {'DXY': 'DX-Y.NYB', 'US10Y': '^TNX', 'US5Y': '^FVX', 'VIX': '^VIX', 'SP500': '^GSPC',
+         'Nasdaq': '^NDX', 'Altin': 'GC=F', 'Petrol': 'CL=F', 'Bakir': 'HG=F'}
 
-if not GITHUB_TOKEN or not GITHUB_REPO:
-    print("❌ HATA: GitHub Token veya Repo bilgisi eksik! Sistem durduruluyor.")
-    exit()
+
+# ------------------------------------------------------------------ GitHub cüzdanı
+def _baslik():
+    return {"Authorization": f"Bearer {os.environ['GH_TOKEN']}", "Accept": "application/vnd.github+json"}
 
 
-def github_veri_oku():
+def _url():
+    return f"https://api.github.com/repos/{os.environ['GH_REPO']}/contents/{DOSYA}"
+
+
+def cuzdan_oku():
+    bos = {"nakit": BASLANGIC_NAKIT, "btc": 0.0, "islem_gecmisi": [], "son_alim_fiyati": 0.0}
+    if not os.environ.get("GH_TOKEN") or not os.environ.get("GH_REPO"):
+        print("⚠️ GH_TOKEN / GH_REPO yok: boş cüzdanla çalışılıyor.")
+        return bos
+    r = requests.get(_url(), headers=_baslik(), timeout=30)
+    if r.status_code != 200:
+        print(f"⚠️ Cüzdan okunamadı ({r.status_code}): boş cüzdanla çalışılıyor.")
+        return bos
+    veri = json.loads(base64.b64decode(r.json()["content"]).decode("utf-8"))
+    for k, v in bos.items():
+        veri.setdefault(k, v)
+    return veri
+
+
+def cuzdan_kaydet(veri, mesaj):
+    r = requests.get(_url(), headers=_baslik(), timeout=30)
+    govde = {"message": mesaj,
+             "content": base64.b64encode(json.dumps(veri, ensure_ascii=False, indent=4).encode("utf-8")).decode()}
+    if r.status_code == 200:
+        govde["sha"] = r.json()["sha"]
+    p = requests.put(_url(), headers=_baslik(), json=govde, timeout=30)
+    print("✅ Cüzdan GitHub'a kaydedildi." if p.status_code in (200, 201) else f"❌ Kayıt hatası: {p.status_code} {p.text[:200]}")
+
+
+# ------------------------------------------------------------------ veri
+def btc_gunluk():
+    """Binance BTCUSDT günlük mumları (TradingView ile aynı kaynak). ABD sunucularından api.binance.com
+    erişilemediği için önce herkese açık veri aynası denenir; olmazsa Yahoo Finance."""
+    for taban in ("https://data-api.binance.vision", "https://api.binance.com"):
+        try:
+            satirlar, son = [], None
+            for _ in range(4):                                   # 4 × 1000 gün ≈ 11 yıl
+                p = {"symbol": "BTCUSDT", "interval": "1d", "limit": 1000}
+                if son:
+                    p["endTime"] = son
+                r = requests.get(f"{taban}/api/v3/klines", params=p, timeout=30)
+                r.raise_for_status()
+                parca = r.json()
+                if not parca:
+                    break
+                satirlar = parca + satirlar
+                son = parca[0][0] - 1
+                if len(parca) < 1000:
+                    break
+            df = pd.DataFrame(satirlar, columns=list("tohlcv") + ["ct", "q", "n", "tb", "tq", "x"])
+            df["tarih"] = pd.to_datetime(df["t"], unit="ms")
+            df = df.drop_duplicates("tarih").set_index("tarih").sort_index()
+            df = df[["o", "h", "l", "c"]].astype(float)
+            df.columns = ["Open", "High", "Low", "Close"]
+            print(f"📈 BTC günlük veri: {taban} ({len(df)} gün)")
+            return df
+        except Exception as e:
+            print(f"   {taban} kullanılamadı: {e}")
+    import yfinance as yf
+    df = yf.download("BTC-USD", period="max", interval="1d", progress=False, auto_adjust=False)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.droplevel(1)
+    df.index = pd.to_datetime(df.index).tz_localize(None)
+    print(f"📈 BTC günlük veri: Yahoo Finance ({len(df)} gün)")
+    return df[["Open", "High", "Low", "Close"]]
+
+
+def makro_gunluk(btc_kapanis):
+    import yfinance as yf
+    veri = {"BTC": btc_kapanis}
+    for ad, kod in MAKRO.items():
+        d = yf.download(kod, period="200d", interval="1d", progress=False, auto_adjust=False)
+        if isinstance(d.columns, pd.MultiIndex):
+            d.columns = d.columns.droplevel(1)
+        s = d["Close"]
+        s.index = pd.to_datetime(s.index).tz_localize(None)
+        veri[ad] = s
+    df = pd.DataFrame(veri)
+    df = df[df.index >= btc_kapanis.index[-200]].ffill()
+    df['BTC_SMA_20'] = df['BTC'].rolling(20).mean()
+    df['BTC_Degisim_1G'] = df['BTC'].pct_change(1)
+    df['BTC_Degisim_7G'] = df['BTC'].pct_change(7)
+    df['DXY_Degisim'] = df['DXY'].pct_change(1)
+    df['US10Y_Baski'] = df['US10Y'] - df['US10Y'].rolling(10).mean()
+    df['US5Y_Degisim'] = df['US5Y'].pct_change(1)
+    df['VIX_Seviye'] = (df['VIX'] > 20).astype(int)
+    for ad in ['SP500', 'Nasdaq', 'Altin', 'Petrol', 'Bakir']:
+        df[f'{ad}_Degisim'] = df[ad].pct_change(1)
+    return df.dropna()
+
+
+def haber_skoru():
     try:
-        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/cuzdan_verileri.json"
-        headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            content_json = response.json()
-            file_content_bytes = base64.b64decode(content_json["content"])
-            veri = json.loads(file_content_bytes.decode('utf-8'))
-            for islem in veri.get("islem_gecmisi", []):
-                if isinstance(islem['Tarih'], str):
-                    islem['Tarih'] = datetime.fromisoformat(islem['Tarih'])
-            return veri["nakit"], veri["btc"], veri["islem_gecmisi"], veri["son_alim_fiyati"]
-    except Exception as e:
-        print(f"⚠️ Okuma Hatası: {e}")
-    return 10000.0, 0.0, [], 0.0
-
-
-def github_veri_kaydet(nakit, btc, islem_gecmisi, son_alim_fiyati):
-    try:
-        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/cuzdan_verileri.json"
-        headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
-        sha = None
-        resp_get = requests.get(url, headers=headers)
-        if resp_get.status_code == 200:
-            sha = resp_get.json().get("sha")
-
-        gecmis_kopya = []
-        for islem in islem_gecmisi:
-            islem_k = islem.copy()
-            if isinstance(islem_k['Tarih'], datetime):
-                islem_k['Tarih'] = islem_k['Tarih'].isoformat()
-            gecmis_kopya.append(islem_k)
-
-        veri = {"nakit": nakit, "btc": btc, "islem_gecmisi": gecmis_kopya, "son_alim_fiyati": son_alim_fiyati}
-        json_str = json.dumps(veri, ensure_ascii=False, indent=4)
-        encoded_content = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
-
-        data = {"message": "🤖 Motor: Cüzdan Güncellemesi", "content": encoded_content}
-        if sha: data["sha"] = sha
-        res = requests.put(url, headers=headers, json=data)
-        if res.status_code in [200, 201]: print("✅ Güncel cüzdan başarıyla GitHub'a kaydedildi.")
-    except Exception as e:
-        print(f"❌ GitHub kayıt hatası: {e}")
-
-
-nakit, btc, islem_gecmisi, son_alim_fiyati = github_veri_oku()
-print(f"💰 Cüzdan: ${nakit:,.2f} Nakit | {btc:.6f} BTC")
-
-
-# --- YENİ: HABER DUYGU ANALİZİ (NLP) ---
-def haber_duygu_analizi():
-    print("📰 Son dakika haberleri okunuyor ve analiz ediliyor...")
-    try:
-        btc_ticker = yf.Ticker("BTC-USD")
-        haberler = btc_ticker.news[:10]  # Son 10 güncel haberi çek
-        analyzer = SentimentIntensityAnalyzer()
-        toplam_skor = 0
-        gecerli_haber = 0
-
-        for h in haberler:
-            baslik = h.get('title', '')
+        import yfinance as yf
+        from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+        an = SentimentIntensityAnalyzer()
+        skorlar = []
+        for h in (yf.Ticker("BTC-USD").news or [])[:10]:
+            baslik = h.get("title") or (h.get("content") or {}).get("title", "")
             if baslik:
-                skor = analyzer.polarity_scores(baslik)['compound']
-                toplam_skor += skor
-                gecerli_haber += 1
-
-        if gecerli_haber > 0:
-            return toplam_skor / gecerli_haber
+                skorlar.append(an.polarity_scores(baslik)["compound"])
+        return float(np.mean(skorlar)) if skorlar else 0.0
     except Exception as e:
-        print(f"⚠️ Haber Analiz Hatası: {e}")
-    return 0.0
+        print(f"⚠️ Haber skoru hesaplanamadı ({e}); 0 kabul edildi.")
+        return 0.0
 
 
-duygu_skoru = haber_duygu_analizi()
-print(f"🌡️ Piyasa Haber Skoru (Duygu): {duygu_skoru:.2f} (-1 Felaket | +1 Coşku)")
+# ------------------------------------------------------------------ CDLTRD (HullMA 20)
+def wma(s, n):
+    w = np.arange(1, n + 1, dtype=float)
+    return s.rolling(n).apply(lambda x: np.dot(x, w) / w.sum(), raw=True)
 
-# 3. VERİ ÇEKME VE ÖZELLİK MÜHENDİSLİĞİ
-print("📊 Makro veriler Yahoo Finance üzerinden çekiliyor...")
-semboller = {'BTC': 'BTC-USD', 'DXY': 'DX-Y.NYB', 'US10Y': '^TNX', 'US5Y': '^FVX', 'VIX': '^VIX', 'SP500': '^GSPC',
-             'Nasdaq': '^NDX', 'Altin': 'GC=F', 'Petrol': 'CL=F', 'Bakir': 'HG=F'}
-veri_sozlugu = {}
-for isim, sembol in semboller.items():
-    df_temp = yf.download(sembol, period='100d', interval='1d', progress=False)
-    if isinstance(df_temp.columns, pd.MultiIndex): df_temp.columns = df_temp.columns.droplevel(1)
-    veri_sozlugu[isim] = df_temp['Close']
 
-df = pd.DataFrame(veri_sozlugu).ffill()
-df['BTC_SMA_20'] = df['BTC'].rolling(window=20).mean()
-df['BTC_Degisim_1G'] = df['BTC'].pct_change(periods=1)
-df['BTC_Degisim_7G'] = df['BTC'].pct_change(periods=7)
-df['DXY_Degisim'] = df['DXY'].pct_change(periods=1)
-df['US10Y_Baski'] = df['US10Y'] - df['US10Y'].rolling(window=10).mean()
-df['US5Y_Degisim'] = df['US5Y'].pct_change(periods=1)
-df['VIX_Seviye'] = (df['VIX'] > 20).astype(int)
-df['SP500_Degisim'] = df['SP500'].pct_change(periods=1)
-df['Nasdaq_Degisim'] = df['Nasdaq'].pct_change(periods=1)
-df['Altin_Degisim'] = df['Altin'].pct_change(periods=1)
-df['Petrol_Degisim'] = df['Petrol'].pct_change(periods=1)
-df['Bakir_Degisim'] = df['Bakir'].pct_change(periods=1)
+def hma(s, n=HMA_UZ):
+    return wma(2 * wma(s, n // 2) - wma(s, n), int(math.floor(math.sqrt(n))))
 
-df_saatlik = yf.download('BTC-USD', period='2d', interval='1h', progress=False)
-if isinstance(df_saatlik.columns, pd.MultiIndex): df_saatlik.columns = df_saatlik.columns.droplevel(1)
-son_durum_makro = df.dropna().iloc[-1:]
-btc_fiyat = float(df_saatlik['Close'].iloc[-1])
-son_saat = df_saatlik.index[-1]
 
-# 4. MODEL TAHMİNİ
-model = XGBClassifier()
-model.load_model("makro_xgboost_modeli.json")
-ozellik_kolonlari = ['BTC_SMA_20', 'BTC_Degisim_1G', 'BTC_Degisim_7G', 'DXY_Degisim', 'US10Y_Baski', 'US5Y_Degisim',
-                     'VIX_Seviye', 'SP500_Degisim', 'Nasdaq_Degisim', 'Altin_Degisim', 'Petrol_Degisim',
-                     'Bakir_Degisim']
-karar = model.predict(son_durum_makro[ozellik_kolonlari])[0]
-print(f"💡 Yapay Zeka Teknik Sinyali: {'AL (1)' if karar == 1 else 'BEKLE / SAT (0)'}")
+def kapanmis_mumlar(gunluk, kural):
+    """Günlük kapanışlardan haftalık/aylık mum; yalnızca tamamen bitmiş dönemler."""
+    c = gunluk["Close"]
+    grup = c.resample(kural)
+    kapanis = grup.last()
+    son_gun = grup.apply(lambda s: s.index.max())
+    bitis = kapanis.index                                       # dönemin son takvim günü
+    biten = bitis <= c.index[-1]                                # son günlük mum bu dönemin sonuna ulaştıysa bitmiştir
+    return kapanis[biten & son_gun.notna()].dropna()
 
-# 5. İŞLEM MANTIĞI VE HABER KALKANI
-islem_yapildi_mi = False
 
-# A. ACİL DURUM KALKANI (Zarar veya Kötü Haber)
-if btc > 0 and son_alim_fiyati > 0:
-    zarar_orani = (btc_fiyat - son_alim_fiyati) / son_alim_fiyati
+def cdltrd_durum(gunluk):
+    """Son kapanmış aylık ve haftalık CDLTRD durumu + günlük göstergeler."""
+    sonuc = {}
+    for ad, kural in (("aylik", "ME"), ("haftalik", "W-SUN")):
+        k = kapanmis_mumlar(gunluk, kural)
+        h = hma(k)
+        sonuc[f"{ad}_cizgi"] = float(h.iloc[-1])
+        sonuc[f"{ad}_yesil"] = bool(h.iloc[-1] > h.iloc[-2])
+        sonuc[f"{ad}_onceki_yesil"] = bool(h.iloc[-2] > h.iloc[-3])
+        sonuc[f"{ad}_kapanis"] = float(k.iloc[-1])
+        sonuc[f"{ad}_son_mum"] = k.index[-1].strftime("%Y-%m-%d")
+    c = gunluk["Close"]
+    tr = pd.concat([gunluk["High"] - gunluk["Low"], (gunluk["High"] - c.shift()).abs(),
+                    (gunluk["Low"] - c.shift()).abs()], axis=1).max(axis=1)
+    sonuc["atr"] = float(tr.ewm(alpha=1 / ATR_UZ, adjust=False).mean().iloc[-1])
+    sonuc["kapanis"] = float(c.iloc[-1])
+    sonuc["onceki_kapanis"] = float(c.iloc[-2])
+    sonuc["gun"] = c.index[-1].strftime("%Y-%m-%d")
+    return sonuc
 
-    # Kalkan: Zarar %5'i geçtiyse VEYA Duygu Skoru -0.40'tan kötüyse PANİK SATIŞI YAP!
-    if zarar_orani <= -0.05 or duygu_skoru <= -0.40:
-        satilacak_tutar = btc * btc_fiyat
-        nakit += satilacak_tutar
-        btc = 0.0
-        son_alim_fiyati = 0.0
-        sebep = "KÖTÜ HABER KALKANI" if duygu_skoru <= -0.40 else "STOP-LOSS"
-        islem_gecmisi.append({'Tarih': son_saat, 'Tip': f'SAT ({sebep})', 'Fiyat': btc_fiyat, 'Tutar': satilacak_tutar})
-        print(f"🚨 {sebep} DEVREYE GİRDİ! Tüm coinler acil satıldı ve nakde geçildi.")
-        islem_yapildi_mi = True
 
-# B. ALIM VEYA KADEMELİ SATIŞ
-if not islem_yapildi_mi:
-    if karar == 1 and nakit > 50:
-        # Kötü haber varsa ALIM YASAKLANIR
-        if duygu_skoru <= -0.40:
-            print("🛑 Model AL dese de Kötü Haber Radarı alımı engelledi! Nakitte kalınıyor.")
-        else:
-            puan = sum([
-                float(son_durum_makro['VIX'].iloc[0]) < 20,
-                float(son_durum_makro['DXY_Degisim'].iloc[0]) < 0,
-                float(son_durum_makro['US10Y_Baski'].iloc[0]) <= 0,
-                float(son_durum_makro['Nasdaq_Degisim'].iloc[0]) > 0,
-                float(son_durum_makro['BTC_Degisim_7G'].iloc[0]) > 0.02
-            ])
+# ------------------------------------------------------------------ karar
+def karar_ver(cz, d, model_karari, makro_satir, haber):
+    """Bugünkü işlemi döndürür: (tip, oran_veya_tutar, gerekçe). tip: 'SAT_HEPSI', 'SAT_YARI', 'AL', None"""
+    cizgi = d["haftalik_cizgi"]
+    alt_bugun = d["kapanis"] < cizgi
+    alt_dun = d["onceki_kapanis"] < cizgi
+    btc, fiyat = cz["btc"], d["kapanis"]
 
-            carpan = 2.0 if puan >= 4 else (1.5 if puan == 3 else (1.0 if puan == 2 else 0.5))
+    if btc > 0:
+        if cz["son_alim_fiyati"] > 0 and (fiyat / cz["son_alim_fiyati"] - 1) <= ZARAR_KES:
+            return "SAT_HEPSI", 1.0, "Zarar kes (son alımdan %5 düşüş)"
+        if haber <= HABER_KOTU:
+            return "SAT_HEPSI", 1.0, f"Kötü haber kalkanı (skor {haber:.2f})"
+        if not d["haftalik_yesil"]:
+            return "SAT_HEPSI", 1.0, "Haftalık CDLTRD kırmızı"
+        if d["haftalik_kapanis"] < cizgi:
+            return "SAT_HEPSI", 1.0, "Hibrit stop: hafta çizginin altında kapandı"
+        if alt_bugun and alt_dun:
+            return "SAT_HEPSI", 1.0, "Hibrit stop: 2 gün üst üste çizginin altında"
+        if alt_bugun and fiyat < cizgi - d["atr"]:
+            return "SAT_HEPSI", 1.0, "Hibrit stop: çizginin 1 ATR altına indi"
+        if alt_bugun and not alt_dun:
+            return "SAT_YARI", 0.5, "Temkin: günlük kapanış haftalık çizginin altına indi"
 
-            # Haberler çok iyiyse çarpanı 1.5 kat agresifleştir
-            if duygu_skoru >= 0.40:
-                carpan *= 1.5
-                print("🚀 Güçlü OLUMLU Haberler alındı! Alım agresifleştiriliyor.")
+    if alt_bugun:
+        return None, 0, "Alım yok: fiyat haftalık çizginin altında"
+    if not (d["aylik_yesil"] and d["haftalik_yesil"]):
+        return None, 0, "Alım yok: aylık ya da haftalık CDLTRD kırmızı"
+    if model_karari != 1:
+        return None, 0, "Alım yok: model BEKLE diyor"
+    if haber <= HABER_KOTU:
+        return None, 0, f"Alım yok: kötü haber (skor {haber:.2f})"
+    m = makro_satir
+    puan = int(sum([m['VIX'] < 20, m['DXY_Degisim'] < 0, m['US10Y_Baski'] <= 0,
+                    m['Nasdaq_Degisim'] > 0, m['BTC_Degisim_7G'] > 0.02]))
+    carpan = 2.0 if puan >= 4 else (1.5 if puan == 3 else (1.0 if puan == 2 else 0.5))
+    if haber >= HABER_IYI:
+        carpan *= 1.5
+    tutar = min(TEMEL_ALIM * carpan, cz["nakit"])
+    if tutar < 10:
+        return None, 0, "Alım yok: nakit bitti"
+    return "AL", tutar, f"Alım: makro puan {puan}/5, çarpan {carpan:.2f}x"
 
-            hedef_tutar = min(1000.0 * carpan, nakit)
-            if hedef_tutar > 10:
-                btc += (hedef_tutar / btc_fiyat)
-                nakit -= hedef_tutar
-                son_alim_fiyati = btc_fiyat
-                islem_gecmisi.append(
-                    {'Tarih': son_saat, 'Tip': f'AL ({puan} Puan)', 'Fiyat': btc_fiyat, 'Tutar': hedef_tutar})
-                print(f"✅ ALIM YAPILDI: ${hedef_tutar:,.2f}")
-                islem_yapildi_mi = True
 
-    elif karar == 0 and btc > 0.0001:
-        satilacak_btc_miktari = btc * 0.50
-        satilacak_tutar = satilacak_btc_miktari * btc_fiyat
-        nakit += satilacak_tutar
-        btc -= satilacak_btc_miktari
+def uygula(cz, tip, deger, gerekce, fiyat, gun):
+    if tip == "AL":
+        cz["btc"] += deger / fiyat
+        cz["nakit"] -= deger
+        cz["son_alim_fiyati"] = fiyat
+        cz["islem_gecmisi"].append({"Tarih": gun, "Tip": f"AL ({gerekce})", "Fiyat": fiyat, "Tutar": deger})
+    elif tip in ("SAT_HEPSI", "SAT_YARI"):
+        miktar = cz["btc"] * deger
+        if tip == "SAT_YARI" and cz["btc"] - miktar < 0.0001:
+            miktar = cz["btc"]
+        gelir = miktar * fiyat
+        cz["btc"] -= miktar
+        cz["nakit"] += gelir
+        if cz["btc"] < 1e-9:
+            cz["btc"], cz["son_alim_fiyati"] = 0.0, 0.0
+        cz["islem_gecmisi"].append({"Tarih": gun, "Tip": f"SAT ({gerekce})", "Fiyat": fiyat, "Tutar": gelir})
 
-        if btc < 0.0001:
-            satilacak_tutar += btc * btc_fiyat
-            nakit += btc * btc_fiyat
-            btc = 0.0
-            son_alim_fiyati = 0.0
 
-        islem_gecmisi.append(
-            {'Tarih': son_saat, 'Tip': 'SAT (Kademeli %50)', 'Fiyat': btc_fiyat, 'Tutar': satilacak_tutar})
-        print(f"🔴 SATIŞ YAPILDI: ${satilacak_tutar:,.2f}")
-        islem_yapildi_mi = True
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--kuru", action="store_true", help="karar ver ama GitHub'a kaydetme")
+    args = ap.parse_args()
+    print("🤖 Günlük motor başladı:", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
 
-if islem_yapildi_mi:
-    github_veri_kaydet(nakit, btc, islem_gecmisi, son_alim_fiyati)
-else:
-    print("⏳ Mevcut piyasa şartlarında yeni işlem yapılmadı. Beklemede kalın.")
+    gunluk = btc_gunluk()
+    bugun = pd.Timestamp(datetime.now(timezone.utc).date())
+    gunluk = gunluk[gunluk.index < bugun]                       # bugünün henüz kapanmamış mumunu at
+    d = cdltrd_durum(gunluk)
+    print(f"📅 Karar günü (kapanmış): {d['gun']}   kapanış {d['kapanis']:,.0f} $")
+    print(f"   Aylık CDLTRD   ({d['aylik_son_mum']}): {'YEŞİL' if d['aylik_yesil'] else 'KIRMIZI'}   çizgi {d['aylik_cizgi']:,.0f}")
+    print(f"   Haftalık CDLTRD ({d['haftalik_son_mum']}): {'YEŞİL' if d['haftalik_yesil'] else 'KIRMIZI'}   çizgi {d['haftalik_cizgi']:,.0f}"
+          f"   (kapanış {'üstünde' if d['kapanis'] >= d['haftalik_cizgi'] else 'ALTINDA'})")
 
-print("🏁 [MOTOR DURDU] Görev tamamlandı, bir sonraki saate kadar uykuda.")
+    makro = makro_gunluk(gunluk["Close"])
+    satir = makro.iloc[-1]
+    from xgboost import XGBClassifier
+    model = XGBClassifier()
+    model.load_model("makro_xgboost_modeli.json")
+    model_karari = int(model.predict(makro.iloc[[-1]][OZELLIKLER])[0])
+    haber = haber_skoru()
+    print(f"   Model: {'AL (1)' if model_karari == 1 else 'BEKLE (0)'}   haber skoru {haber:+.2f}   (makro verisi {makro.index[-1]:%Y-%m-%d})")
+
+    cz = cuzdan_oku()
+    son_gun_islem = cz.get("son_durum", {}).get("gun")
+    if son_gun_islem == d["gun"]:
+        print("⏸️ Bu gün için karar zaten verilmiş; tekrar işlem yapılmıyor.")
+        return
+    tip, deger, gerekce = karar_ver(cz, d, model_karari, satir, haber)
+    print(f"➡️ KARAR: {tip or 'İŞLEM YOK'} — {gerekce}")
+    uygula(cz, tip, deger, gerekce, d["kapanis"], d["gun"] + "T23:59:00")
+    cz["son_durum"] = {**d, "model": model_karari, "haber": round(haber, 3), "karar": tip or "YOK", "gerekce": gerekce,
+                       "calisma": datetime.now(timezone.utc).isoformat(timespec="minutes")}
+    toplam = cz["nakit"] + cz["btc"] * d["kapanis"]
+    print(f"💰 Nakit {cz['nakit']:,.2f} $ | BTC {cz['btc']:.6f} | Toplam {toplam:,.2f} $")
+    if args.kuru:
+        print("🧪 Kuru çalıştırma: hiçbir şey kaydedilmedi.")
+    else:
+        cuzdan_kaydet(cz, f"🤖 Günlük motor {d['gun']}: {tip or 'işlem yok'}")
+
+
+if __name__ == "__main__":
+    main()
