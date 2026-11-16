@@ -290,6 +290,7 @@ def main():
           f"   (kapanış {'üstünde' if d['kapanis'] >= d['haftalik_cizgi'] else 'ALTINDA'})")
 
     makro = makro_gunluk(gunluk["Close"])
+    makro = makro[makro.index < bugun]                          # bugünün henüz bitmemiş makro verisini kullanma
     satir = makro.iloc[-1]
     from xgboost import XGBClassifier
     model = XGBClassifier()
