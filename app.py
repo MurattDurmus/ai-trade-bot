@@ -1,266 +1,268 @@
-import streamlit as st
-import pandas as pd
-import yfinance as yf
-import plotly.graph_objects as go
-from datetime import datetime
-import requests
+"""
+ai-trade-bot — izleme paneli (düzeltilmiş sürüm, 17 Kasım 2026)
+
+Değişenler:
+  - Cüzdan okunamazsa sessizce 10.000 $ göstermek yerine hatayı açıkça yazar.
+  - Motorun her gün kaydettiği "son_durum" gösterilir: aylık/haftalık CDLTRD (HullMA 20, kapanmış mum),
+    model kararı, haber skoru, günün kararı ve gerekçesi.
+  - Koda sabit yazılmış "piyasa yorumu" metinleri kaldırıldı; yerine yalnızca ölçülen değerler ve
+    motorun kendi kuralları yazılır.
+  - Grafik günlük: son 180 günün günlük mumları + haftalık CDLTRD çizgisi (kapanmış haftalar) + işlemler.
+  - "Her saat başı" yazısı düzeltildi: motor günde bir, 03:15'te çalışır.
+  - Sıfırlama düğmesi onay ister.
+Sanal (kağıt üstünde) işlemleri gösterir. Gerçek emir göndermez. Yatırım tavsiyesi değildir.
+"""
 import base64
 import json
+import math
 import time
+from datetime import datetime
 
-# --- SAYFA AYARLARI ---
-st.set_page_config(page_title="AI Trade Dashboard", page_icon="📊", layout="wide")
-st.title("📊 AI Trade Gösterge Paneli (7/24 Otonom)")
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import requests
+import streamlit as st
+import yfinance as yf
+
+st.set_page_config(page_title="AI Trade Paneli", page_icon="📊", layout="wide")
+st.title("📊 AI Trade Paneli (sanal, günlük)")
+
+BASLANGIC = 10000.0
+HMA_UZ = 20
 
 
-# --- GİTHUB BAĞLANTI FONKSİYONLARI ---
-def github_veri_oku():
+# ------------------------------------------------------------------ GitHub cüzdanı
+def _istek_bilgisi():
+    repo = st.secrets["GITHUB_REPO"]
+    return (f"https://api.github.com/repos/{repo}/contents/cuzdan_verileri.json",
+            {"Authorization": f"Bearer {st.secrets['GITHUB_TOKEN']}", "Accept": "application/vnd.github+json"})
+
+
+@st.cache_data(ttl=60)
+def cuzdan_oku():
+    """(veri, hata) döndürür. Okunamazsa veri None olur."""
     try:
-        token = st.secrets["GITHUB_TOKEN"]
-        repo = st.secrets["GITHUB_REPO"]
-        url = f"https://api.github.com/repos/{repo}/contents/cuzdan_verileri.json"
-        headers = {"Authorization": f"Bearer {token}", "Cache-Control": "no-cache"}
-
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            content_json = response.json()
-            file_content_bytes = base64.b64decode(content_json["content"])
-            veri = json.loads(file_content_bytes.decode('utf-8'))
-            for islem in veri.get("islem_gecmisi", []):
-                if isinstance(islem['Tarih'], str):
-                    islem['Tarih'] = datetime.fromisoformat(islem['Tarih'])
-            return veri["nakit"], veri["btc"], veri["islem_gecmisi"], veri["son_alim_fiyati"]
+        url, bas = _istek_bilgisi()
+        r = requests.get(url, headers=bas, timeout=20)
     except Exception as e:
-        st.error(f"Veri çekilemedi: {e}")
-    return 10000.0, 0.0, [], 0.0
+        return None, f"GitHub'a bağlanılamadı: {e}"
+    if r.status_code == 401:
+        return None, "GitHub token geçersiz ya da süresi dolmuş (401). Streamlit Secrets'taki GITHUB_TOKEN'ı yenileyin."
+    if r.status_code == 404:
+        return None, "Depo ya da cuzdan_verileri.json bulunamadı (404). GITHUB_REPO ve token'ın depo erişimini kontrol edin."
+    if r.status_code != 200:
+        return None, f"GitHub cevabı: {r.status_code}"
+    veri = json.loads(base64.b64decode(r.json()["content"]).decode("utf-8"))
+    return veri, None
 
 
 def cuzdan_sifirla():
-    try:
-        token = st.secrets["GITHUB_TOKEN"]
-        repo = st.secrets["GITHUB_REPO"]
-        url = f"https://api.github.com/repos/{repo}/contents/cuzdan_verileri.json"
-        headers = {"Authorization": f"Bearer {token}"}
-
-        sha = None
-        resp_get = requests.get(url, headers=headers)
-        if resp_get.status_code == 200:
-            sha = resp_get.json().get("sha")
-
-        veri = {
-            "nakit": 10000.0,
-            "btc": 0.0,
-            "islem_gecmisi": [],
-            "son_alim_fiyati": 0.0
-        }
-
-        json_str = json.dumps(veri, ensure_ascii=False, indent=4)
-        encoded_content = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
-
-        data = {
-            "message": "🔄 Sistem Sıfırlandı (Kullanıcı Talebi)",
-            "content": encoded_content
-        }
-        if sha:
-            data["sha"] = sha
-
-        res = requests.put(url, headers=headers, json=data)
-        if res.status_code in [200, 201]:
-            st.success("✅ Cüzdan başarıyla 10.000$ başlangıç durumuna sıfırlandı!")
-            time.sleep(2)
-            st.rerun()
-        else:
-            st.error("❌ Sıfırlama başarısız oldu!")
-    except Exception as e:
-        st.error(f"GitHub kayıt hatası: {e}")
+    url, bas = _istek_bilgisi()
+    r = requests.get(url, headers=bas, timeout=20)
+    veri = {"nakit": BASLANGIC, "btc": 0.0, "islem_gecmisi": [], "son_alim_fiyati": 0.0}
+    govde = {"message": "🔄 Panelden sıfırlandı",
+             "content": base64.b64encode(json.dumps(veri, ensure_ascii=False, indent=4).encode()).decode()}
+    if r.status_code == 200:
+        govde["sha"] = r.json()["sha"]
+    p = requests.put(url, headers=bas, json=govde, timeout=20)
+    return p.status_code in (200, 201), p.status_code
 
 
-nakit, btc, islem_gecmisi, son_alim_fiyati = github_veri_oku()
-
-# --- YAN MENÜ (SIDEBAR) & AYARLAR ---
-with st.sidebar:
-    st.header("⚙️ Sistem Ayarları")
-    st.write("Eğer veriler bozulursa veya testi baştan başlatmak isterseniz aşağıdaki butonu kullanabilirsiniz.")
-    st.divider()
-    if st.button("⚠️ Cüzdanı Sıfırla (Reset)", use_container_width=True):
-        cuzdan_sifirla()
+def tarih_cevir(x):
+    t = pd.Timestamp(x)
+    return t.tz_convert(None) if t.tzinfo else t
 
 
-# --- HAFİF VERİ ÇEKİMİ (MAkro + Haberler Eklendi) ---
-@st.cache_data(ttl=60)
-def btc_fiyat_getir():
-    # 1. BTC Saatlik Fiyatlar
-    df = yf.download('BTC-USD', period='7d', interval='1h', progress=False)
+# ------------------------------------------------------------------ piyasa verisi
+@st.cache_data(ttl=900)
+def btc_gunluk():
+    for taban in ("https://data-api.binance.vision", "https://api.binance.com"):
+        try:
+            r = requests.get(f"{taban}/api/v3/klines",
+                             params={"symbol": "BTCUSDT", "interval": "1d", "limit": 1000}, timeout=20)
+            r.raise_for_status()
+            df = pd.DataFrame(r.json()).iloc[:, :5]
+            df.columns = ["t", "Open", "High", "Low", "Close"]
+            df.index = pd.to_datetime(df["t"], unit="ms")
+            return df[["Open", "High", "Low", "Close"]].astype(float), "Binance BTCUSDT"
+        except Exception:
+            continue
+    df = yf.download("BTC-USD", period="3y", interval="1d", progress=False, auto_adjust=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.droplevel(1)
+    df.index = pd.to_datetime(df.index).tz_localize(None)
+    return df[["Open", "High", "Low", "Close"]], "Yahoo BTC-USD"
 
-    # 2. Makro Veriler (Ortalama hesabı için 60 günlük çekiyoruz)
-    semboller = {'DXY': 'DX-Y.NYB', 'US10Y': '^TNX', 'VIX': '^VIX'}
-    veri_sozlugu = {}
-    for isim, sembol in semboller.items():
-        df_temp = yf.download(sembol, period='60d', interval='1d', progress=False)
-        if isinstance(df_temp.columns, pd.MultiIndex):
-            df_temp.columns = df_temp.columns.droplevel(1)
-        veri_sozlugu[isim] = df_temp['Close']
-    df_makro = pd.DataFrame(veri_sozlugu).ffill()
 
-    # 3. Yabancı Kaynaklardan Canlı Kripto Haberleri
-    haberler = []
+@st.cache_data(ttl=900)
+def makro():
+    out = {}
+    for ad, kod in {"DXY": "DX-Y.NYB", "US10Y": "^TNX", "VIX": "^VIX"}.items():
+        d = yf.download(kod, period="90d", interval="1d", progress=False, auto_adjust=False)
+        if isinstance(d.columns, pd.MultiIndex):
+            d.columns = d.columns.droplevel(1)
+        out[ad] = d["Close"].dropna()
+    return out
+
+
+@st.cache_data(ttl=1800)
+def haberler():
+    sonuc = []
     try:
-        btc_ticker = yf.Ticker("BTC-USD")
-        haberler = btc_ticker.news[:3]  # Son 3 haberi al
-    except:
+        for h in (yf.Ticker("BTC-USD").news or [])[:5]:
+            c = h.get("content") or h
+            baslik = c.get("title")
+            link = (c.get("canonicalUrl") or {}).get("url") or c.get("link")
+            kaynak = (c.get("provider") or {}).get("displayName") or c.get("publisher", "")
+            if baslik:
+                sonuc.append((baslik, link, kaynak))
+    except Exception:
         pass
-
-    return df, df_makro, haberler
-
-
-df_saatlik, df_makro, haberler = btc_fiyat_getir()
-anlik_fiyat = float(df_saatlik['Close'].iloc[-1])
-toplam_varlik = nakit + (btc * anlik_fiyat)
-kar_zarar = toplam_varlik - 10000.0
-
-# --- PİYASA HAVASI VE CANLI HABER RADARI ---
-dxy_anlik = float(df_makro['DXY'].iloc[-1])
-dxy_degisim = (dxy_anlik - float(df_makro['DXY'].iloc[-2])) / float(df_makro['DXY'].iloc[-2]) * 100
-dxy_ort = float(df_makro['DXY'].mean())
-
-vix_anlik = float(df_makro['VIX'].iloc[-1])
-vix_ort = float(df_makro['VIX'].mean())
-
-us10y_anlik = float(df_makro['US10Y'].iloc[-1])
-us10y_ort = float(df_makro['US10Y'].mean())
+    return sonuc
 
 
-# Makro Göstergeleri Kıyaslama Fonksiyonu
-def kiyasla_ve_yazdir(anlik, ortalama):
-    fark = ((anlik - ortalama) / ortalama) * 100
-    if fark > 5:
-        return f"🔴 Epey Üzerinde (Ort: {ortalama:.2f})"
-    elif fark > 0:
-        return f"🟠 Üzerinde (Ort: {ortalama:.2f})"
-    elif fark > -5:
-        return f"🟢 Altında (Ort: {ortalama:.2f})"
-    else:
-        return f"🔵 Epey Altında (Ort: {ortalama:.2f})"
+def wma(s, n):
+    w = np.arange(1, n + 1, dtype=float)
+    return s.rolling(n).apply(lambda x: np.dot(x, w) / w.sum(), raw=True)
 
 
-piyasa_durumu = ""
-renk = ""
-ikon = ""
-detay_not = ""
+def hma(s, n=HMA_UZ):
+    return wma(2 * wma(s, n // 2) - wma(s, n), int(math.floor(math.sqrt(n))))
 
-if dxy_degisim > 0 and us10y_anlik > 4.20:
-    piyasa_durumu = "TEHLİKELİ / BASKILI"
-    renk = "error"
-    ikon = "🚨"
-    detay_not = "Güçlü Dolar (DXY) ve yüksek ABD Tahvil Faizleri kripto piyasası üzerinde ciddi bir baskı oluşturuyor. Son günlerde spot Bitcoin ETF'lerindeki çıkışlar ve yaklaşan ABD bilanço sezonu belirsizliği, kurumsal talebi zayıflattı. Bu makroekonomik fırtına dinene kadar yapay zeka muhtemelen nakitte kalmayı (beklemeyi) veya çok düşük tutarlı temkinli alımlar yapmayı seçecektir. Likidite havuzlarında aşağı yönlü sarkmalar yaşanabilir."
-elif vix_anlik < 18 and dxy_degisim < 0:
-    piyasa_durumu = "OLUMLU / RİSK İŞTAHI YÜKSEK"
-    renk = "success"
-    ikon = "🟢"
-    detay_not = "Piyasada korku endeksi (VIX) sakin ve Dolar Endeksi (DXY) geri çekiliyor. Bu durum riskli varlıklara (Bitcoin ve Altcoinler) doğru bir sermaye akışı sağlıyor. 80.000$ psikolojik desteğinin güçlü kalması ve faiz beklentilerindeki yumuşama, yükseliş trendini destekliyor. Yapay zeka bu koşullarda daha agresif 'AL' sinyalleri üretebilir ve portföydeki BTC ağırlığını artırabilir."
+
+def haftalik_cizgi(gunluk):
+    """Kapanmış haftaların CDLTRD çizgisi, hafta bittikten sonraki günden itibaren geçerli (basamaklı)."""
+    k = gunluk["Close"].resample("W-SUN").last()
+    k = k[k.index <= gunluk.index[-1]]
+    h = hma(k)
+    yesil = h > h.shift(1)
+    h.index = h.index + pd.Timedelta(days=1)
+    yesil.index = h.index
+    t = h.index.union(gunluk.index)
+    return h.reindex(t).ffill().reindex(gunluk.index), yesil.reindex(t).ffill().reindex(gunluk.index)
+
+
+# ------------------------------------------------------------------ sayfa
+veri, hata = cuzdan_oku()
+
+with st.sidebar:
+    st.header("⚙️ Ayarlar")
+    st.caption("Sanal cüzdanı 10.000 $ başlangıca döndürür. Geri alınamaz.")
+    onay = st.checkbox("Sıfırlamak istediğimi onaylıyorum")
+    if st.button("⚠️ Cüzdanı sıfırla", use_container_width=True, disabled=not onay):
+        ok, kod = cuzdan_sifirla()
+        if ok:
+            st.success("Sıfırlandı.")
+            cuzdan_oku.clear()
+            time.sleep(1)
+            st.rerun()
+        else:
+            st.error(f"Sıfırlanamadı (GitHub {kod}).")
+
+if hata:
+    st.error(f"Cüzdan okunamadı: {hata}")
+    st.stop()
+
+gunluk, kaynak = btc_gunluk()
+fiyat = float(gunluk["Close"].iloc[-1])
+nakit, btc = float(veri.get("nakit", 0)), float(veri.get("btc", 0))
+toplam = nakit + btc * fiyat
+islemler = veri.get("islem_gecmisi", [])
+sd = veri.get("son_durum")
+
+st.caption("Motor GitHub Actions'ta **günde bir kez (03:15 TSİ)** BTC'nin kapanmış günlük mumuna göre karar verir. "
+           "Bu panel yalnızca izler; işlem yapmaz.")
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Toplam varlık", f"${toplam:,.2f}", f"{(toplam / BASLANGIC - 1) * 100:+.2f}% (başlangıç 10.000 $)")
+c2.metric("Nakit", f"${nakit:,.2f}")
+c3.metric("BTC", f"{btc:.6f}", f"${btc * fiyat:,.0f}" if btc else None)
+c4.metric("BTC fiyatı", f"${fiyat:,.0f}", help=f"Kaynak: {kaynak}, bugünkü mum (henüz kapanmadı)")
+
+st.divider()
+st.subheader("🧭 Motorun son kararı")
+if not sd:
+    st.info("Motor henüz yeni sürümle çalışmadı; yarın 03:15'ten sonra burada görünecek.")
 else:
-    piyasa_durumu = "TEMKİNLİ / YÖN ARAYIŞI"
-    renk = "warning"
-    ikon = "⏳"
-    detay_not = "Piyasa şu an bir kırılım noktasında ve yatay sıkışma (konsolidasyon) sürecinde. Makro veriler karışık sinyaller veriyor; FOMC tutanakları, PMI verileri ve jeopolitik gelişmeler yakından izleniyor. Sistem şu anda fırsat kolluyor, olası bir likidite avına veya stop patlatma (squeeze) hareketine karşı kasanın büyük bölümünü nakitte tutarak güvenliği ön planda tutuyor."
+    def rozet(yesil):
+        return "🟢 Yeşil (yükseliyor)" if yesil else "🔴 Kırmızı (düşüyor)"
 
-# 24 Saatlik Sert Fiyat Hareketi ve Haber Algılayıcı
-btc_degisim_24s = (anlik_fiyat - float(df_saatlik['Close'].iloc[-24])) / float(df_saatlik['Close'].iloc[-24]) * 100
-haber_kutusu = ""
+    a, b, c = st.columns(3)
+    a.markdown(f"**Aylık CDLTRD** ({sd['aylik_son_mum']} kapanışı)  \n{rozet(sd['aylik_yesil'])}  \nÇizgi: {sd['aylik_cizgi']:,.0f} $")
+    alt = sd["kapanis"] < sd["haftalik_cizgi"]
+    b.markdown(f"**Haftalık CDLTRD** ({sd['haftalik_son_mum']} kapanışı)  \n{rozet(sd['haftalik_yesil'])}  \n"
+               f"Çizgi: {sd['haftalik_cizgi']:,.0f} $ — kapanış {'**altında**' if alt else 'üstünde'}")
+    c.markdown(f"**Model:** {'AL (1)' if sd.get('model') == 1 else 'BEKLE (0)'}  \n"
+               f"**Haber skoru:** {sd.get('haber', 0):+.2f} (−1 kötü, +1 iyi)  \n"
+               f"**Karar günü:** {sd['gun']} kapanışı {sd['kapanis']:,.0f} $")
+    karar_ad = {"AL": "🟢 ALIM", "SAT_HEPSI": "🔴 HEPSİNİ SAT", "SAT_YARI": "🟠 YARISINI SAT"}.get(sd.get("karar"), "⏸️ İŞLEM YOK")
+    st.markdown(f"#### {karar_ad}: {sd.get('gerekce', '')}")
+    st.caption(f"Motorun çalıştığı an (UTC): {sd.get('calisma', '-')}")
 
-if abs(btc_degisim_24s) >= 2.5:  # Yüzde 2.5 ve üzeri bir hareket varsa radarı tetikle
-    hareket_tipi = "🚨 SERT DÜŞÜŞ" if btc_degisim_24s < 0 else "🚀 GÜÇLÜ YÜKSELİŞ"
-    renk_kodu = "rgba(255, 75, 75, 0.15)" if btc_degisim_24s < 0 else "rgba(0, 204, 150, 0.15)"
-    cerceve = "#ff4b4b" if btc_degisim_24s < 0 else "#00cc96"
-
-    haber_linkleri = "".join([
-                                 f"<li><a href='{h.get('link', '#')}' target='_blank' style='color:#4da6ff; text-decoration:none;'>{h.get('title', 'Haber Başlığı')}</a> <span style='color:gray; font-size:12px;'>({h.get('publisher', 'Kaynak')})</span></li>"
-                                 for h in haberler if 'title' in h])
-
-    if haber_linkleri:
-        haber_kutusu = f"""
-        <div style='margin-top: 15px; padding:15px; border-radius:10px; border-left: 5px solid {cerceve}; background-color: {renk_kodu};'>
-            <b>{hareket_tipi} ALARMI (Son 24H: %{btc_degisim_24s:.2f})</b><br>
-            Piyasadaki bu ani hareketlenmeyle ilişkili olabilecek son global gelişmeler (İngilizce Kaynaklar):
-            <ul style='margin-top:5px; margin-bottom:0;'>
-                {haber_linkleri}
-            </ul>
-        </div>
-        """
-
-with st.expander(f"{ikon} **GÜNCEL PİYASA DURUMU: {piyasa_durumu}**", expanded=True):
+with st.expander("Motorun kuralları"):
     st.markdown(
-        f"<div style='padding:15px; border-radius:10px; border-left: 5px solid {'#ff4b4b' if renk == 'error' else '#00cc96' if renk == 'success' else '#ffcc00'}; background-color: rgba(255,255,255,0.05);'>{detay_not}</div>",
-        unsafe_allow_html=True)
-
-    # Eğer sert hareket varsa flaş haber kutusunu göster
-    if haber_kutusu != "":
-        st.markdown(haber_kutusu, unsafe_allow_html=True)
-
-    st.write("")  # Görsel Boşluk
-
-    col_m1, col_m2, col_m3 = st.columns(3)
-    col_m1.metric("Dolar Endeksi (DXY)", f"{dxy_anlik:.2f}", f"{dxy_degisim:.2f}%", delta_color="inverse")
-    col_m1.caption(kiyasla_ve_yazdir(dxy_anlik, dxy_ort))
-
-    col_m2.metric("Korku Endeksi (VIX)", f"{vix_anlik:.2f}")
-    col_m2.caption(kiyasla_ve_yazdir(vix_anlik, vix_ort))
-
-    col_m3.metric("ABD 10Y Tahvil", f"%{us10y_anlik:.2f}")
-    col_m3.caption(kiyasla_ve_yazdir(us10y_anlik, us10y_ort))
+        "- **Alım:** aylık ve haftalık CDLTRD yeşil, günlük kapanış haftalık çizginin üstünde, model AL diyor, haber skoru −0,40'tan iyi. "
+        "Tutar 1.000 $ × makro çarpan (0,5–2), haberler çok iyiyse × 1,5.\n"
+        "- **Yarısını sat:** günlük kapanış haftalık çizginin altına ilk kez indi.\n"
+        "- **Hepsini sat:** haftalık CDLTRD kırmızı; hafta çizginin altında kapandı; 2 gün üst üste çizginin altında; "
+        "çizginin 1 ATR altına indi; son alımdan %5 zarar; haber skoru −0,40'ın altında.\n"
+        "- Model BEKLE derse satış yapılmaz, yalnızca alım yapılmaz.")
 
 st.divider()
-
-# --- ARAYÜZ YERLEŞİMİ (Devamı) ---
-st.info(
-    "ℹ️ Bu panel sadece izleme amaçlıdır. Alım-Satım kararları ve işlemler arka planda GitHub Actions sunucularında her saat başı otonom olarak yapılmaktadır.")
-
-if st.button("🔄 Ekranı Güncelle", use_container_width=True):
-    st.rerun()
-
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Toplam Varlık", f"${toplam_varlik:,.2f}", f"${kar_zarar:,.2f} Net Kar")
-col2.metric("Nakit Bakiye", f"${nakit:,.2f}")
-col3.metric("BTC Miktarı", f"{btc:.6f} BTC")
-col4.metric("Anlık BTC Fiyatı", f"${anlik_fiyat:,.2f}")
-
-st.divider()
-
-col_grafik, col_hesap = st.columns([3, 1])
-
-with col_grafik:
-    st.subheader("📈 7 Günlük İşlem Grafiği")
-    fig = go.Figure(data=[go.Candlestick(
-        x=df_saatlik.index, open=df_saatlik['Open'], high=df_saatlik['High'],
-        low=df_saatlik['Low'], close=df_saatlik['Close'], name='BTC/USD'
-    )])
-
-    for islem in islem_gecmisi:
-        islem_renk = '#00ff00' if 'AL' in islem['Tip'] else '#ff0000'
-        sembol = 'triangle-up' if 'AL' in islem['Tip'] else 'triangle-down'
-        konum = 'bottom center' if 'AL' in islem['Tip'] else 'top center'
-        metin = f"{islem['Tip']}<br>${islem['Fiyat']:,.0f}"
-
+sol, sag = st.columns([3, 1])
+with sol:
+    st.subheader("📈 Son 180 gün (günlük) ve haftalık CDLTRD")
+    cizgi, yesil = haftalik_cizgi(gunluk)
+    g = gunluk.iloc[-180:]
+    cz, ys = cizgi.iloc[-180:], yesil.iloc[-180:]
+    fig = go.Figure(go.Candlestick(x=g.index, open=g["Open"], high=g["High"], low=g["Low"], close=g["Close"],
+                                   name="BTC", showlegend=False))
+    fig.add_trace(go.Scatter(x=cz.index, y=cz.where(ys == 1), mode="lines", line=dict(color="#16a34a", width=2),
+                             name="Haftalık CDLTRD (yeşil)", line_shape="hv"))
+    fig.add_trace(go.Scatter(x=cz.index, y=cz.where(ys == 0), mode="lines", line=dict(color="#dc2626", width=2),
+                             name="Haftalık CDLTRD (kırmızı)", line_shape="hv"))
+    for i in islemler:
+        t = tarih_cevir(i["Tarih"]).normalize()
+        if t < g.index[0]:
+            continue
+        al = str(i["Tip"]).startswith("AL")
         fig.add_trace(go.Scatter(
-            x=[islem['Tarih']], y=[islem['Fiyat']], mode='markers+text',
-            marker=dict(symbol=sembol, size=14, color=islem_renk, line=dict(width=1, color='white')),
-            text=[metin], textposition=konum, name=islem['Tip'], showlegend=False
-        ))
-
-    fig.update_layout(template='plotly_dark', margin=dict(l=0, r=0, t=30, b=0), height=500,
-                      xaxis_rangeslider_visible=False)
+            x=[t], y=[i["Fiyat"]], mode="markers", showlegend=False,
+            marker=dict(symbol="triangle-up" if al else "triangle-down", size=13,
+                        color="#16a34a" if al else "#dc2626", line=dict(width=1, color="white")),
+            hovertext=f"{i['Tip']}<br>{i['Fiyat']:,.0f} $ — {i['Tutar']:,.0f} $", hoverinfo="text"))
+    fig.update_layout(template="plotly_dark", height=520, margin=dict(l=0, r=0, t=10, b=0),
+                      xaxis_rangeslider_visible=False, legend=dict(orientation="h", y=1.02))
     st.plotly_chart(fig, use_container_width=True)
+    st.caption("Haftalık çizgi yalnızca kapanmış haftalardan hesaplanır ve hafta bittikten sonraki günden itibaren gösterilir.")
 
-with col_hesap:
-    st.subheader("📜 İşlem Defteri")
-    if len(islem_gecmisi) == 0:
-        st.write("Henüz otonom işlem yapılmadı.")
-    else:
-        for islem in reversed(islem_gecmisi):
-            islem_renk_ikon = "🟢" if "AL" in islem['Tip'] else "🔴"
-            zaman = islem['Tarih'].strftime("%d %b %H:%M")
-            with st.expander(f"{islem_renk_ikon} {islem['Tip']} - {zaman}"):
-                st.write(f"**Fiyat:** ${islem['Fiyat']:,.2f}")
-                st.write(f"**Tutar:** ${islem['Tutar']:,.2f}")
+with sag:
+    st.subheader("📜 İşlem defteri")
+    if not islemler:
+        st.write("Henüz işlem yok.")
+    for i in reversed(islemler[-30:]):
+        ikon = "🟢" if str(i["Tip"]).startswith("AL") else "🔴"
+        with st.expander(f"{ikon} {tarih_cevir(i['Tarih']):%d %b %Y} — {i['Tip']}"):
+            st.write(f"Fiyat: {i['Fiyat']:,.2f} $")
+            st.write(f"Tutar: {i['Tutar']:,.2f} $")
+
+st.divider()
+st.subheader("🌍 Makro göstergeler (son 90 gün ortalamasına göre)")
+m = makro()
+kol = st.columns(3)
+for k, (ad, etiket) in zip(kol, [("DXY", "Dolar endeksi"), ("US10Y", "ABD 10 yıllık faiz %"), ("VIX", "Korku endeksi (VIX)")]):
+    s = m[ad]
+    if len(s) < 2:
+        k.metric(etiket, "veri yok")
+        continue
+    son, ort = float(s.iloc[-1]), float(s.mean())
+    k.metric(etiket, f"{son:.2f}", f"{(son / float(s.iloc[-2]) - 1) * 100:+.2f}% (1 gün)", delta_color="inverse")
+    k.caption(f"Ortalama {ort:.2f}; bugünkü değer ortalamanın %{(son / ort - 1) * 100:+.1f} {'üstünde' if son > ort else 'altında'}")
+st.caption("Bu değerler yalnızca bilgi içindir; motorun makro çarpanı alım tutarını belirlerken bunlara bakar.")
+
+h = haberler()
+if h:
+    with st.expander("📰 Son BTC haberleri (Yahoo Finance, İngilizce)"):
+        for baslik, link, kay in h:
+            st.markdown(f"- [{baslik}]({link}) — {kay}" if link else f"- {baslik} — {kay}")
