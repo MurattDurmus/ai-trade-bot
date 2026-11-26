@@ -820,19 +820,19 @@
         "aylik_onceki_yesil": true,
         "aylik_kapanis": 77582.02,
         "aylik_son_mum": "2026-10-31",
-        "haftalik_cizgi": 77891.95659004331,
+        "haftalik_cizgi": 77891.9565900433,
         "haftalik_yesil": false,
         "haftalik_onceki_yesil": false,
         "haftalik_kapanis": 61271.08,
         "haftalik_son_mum": "2026-11-22",
-        "atr": 2820.2596898262964,
-        "kapanis": 59832.0,
-        "onceki_kapanis": 61270.93,
-        "gun": "2026-11-24",
-        "model": 1,
-        "haber": -0.008,
+        "atr": 2840.5947039251014,
+        "kapanis": 60458.01,
+        "onceki_kapanis": 59832.0,
+        "gun": "2026-11-25",
+        "model": 0,
+        "haber": -0.054,
         "karar": "YOK",
         "gerekce": "Alım yok: fiyat haftalık çizginin altında",
-        "calisma": "2026-11-25T08:27+00:00"
+        "calisma": "2026-11-26T08:12+00:00"
     }
 }
