@@ -825,14 +825,14 @@
         "haftalik_onceki_yesil": false,
         "haftalik_kapanis": 61271.08,
         "haftalik_son_mum": "2026-11-22",
-        "atr": 2789.0849446557786,
-        "kapanis": 60577.18,
-        "onceki_kapanis": 60458.01,
-        "gun": "2026-11-26",
-        "model": 1,
-        "haber": -0.074,
+        "atr": 2819.423810807789,
+        "kapanis": 59923.1,
+        "onceki_kapanis": 60577.18,
+        "gun": "2026-11-27",
+        "model": 0,
+        "haber": -0.026,
         "karar": "YOK",
         "gerekce": "Alım yok: fiyat haftalık çizginin altında",
-        "calisma": "2026-11-27T08:23+00:00"
+        "calisma": "2026-11-28T07:43+00:00"
     }
 }
